@@ -1,0 +1,59 @@
+source "Kconfig.zephyr"
+
+menu "Wireless time synchronization"
+
+choice TIME_SYNC_ROLE
+	prompt "Time sync role"
+	default TIME_SYNC_ROLE_SLAVE
+
+config TIME_SYNC_ROLE_MASTER
+	bool "Master"
+
+config TIME_SYNC_ROLE_SLAVE
+	bool "Slave"
+
+endchoice
+
+config TIME_SYNC_NETWORK_ID
+	hex "Private sync network ID"
+	default 0x54534e52
+
+config TIME_SYNC_RF_CHANNEL
+	int "Raw RADIO frequency offset from 2400 MHz"
+	default 40
+	range 0 100
+
+config TIME_SYNC_INTERVAL_US
+	int "Sync beacon interval in microseconds"
+	default 50000
+
+config TIME_SYNC_PPS_PERIOD_US
+	int "PPS period in microseconds"
+	default 1000000
+
+config TIME_SYNC_PPS_WIDTH_US
+	int "PPS pulse width in microseconds"
+	default 100
+
+config TIME_SYNC_RADIO_DELAY_US
+	int "Calibrated residual radio reference delay in microseconds"
+	default 0
+
+config TIME_SYNC_RADIO_TXEN_TO_ADDRESS_US
+	int "Master TXEN to RADIO ADDRESS reference delay in microseconds"
+	default 88
+
+config TIME_SYNC_STATUS_INTERVAL_MS
+	int "Status log interval in milliseconds"
+	default 1000
+
+config TIME_SYNC_LED_HEARTBEAT
+	bool "Blink board LED as a runtime heartbeat"
+	default y
+
+config TIME_SYNC_LED_HEARTBEAT_PERIOD_MS
+	int "LED heartbeat toggle period in milliseconds"
+	default 1000
+	depends on TIME_SYNC_LED_HEARTBEAT
+
+endmenu
