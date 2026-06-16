@@ -25,7 +25,7 @@ config TIME_SYNC_RF_CHANNEL
 
 config TIME_SYNC_INTERVAL_US
 	int "Sync beacon interval in microseconds"
-	default 50000
+	default 100000
 
 config TIME_SYNC_PPS_PERIOD_US
 	int "PPS period in microseconds"
