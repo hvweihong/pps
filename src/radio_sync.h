@@ -16,6 +16,14 @@ struct radio_sync_stats {
 	uint32_t rx_crc_errors;
 	uint32_t rx_decode_errors;
 	uint32_t busy_errors;
+	uint32_t tx_timeout_errors;
+	uint32_t tx_timing_errors;
+	int32_t last_tx_error_us;
+	uint32_t last_tx_ref_age_us;
+	uint32_t last_rx_ref_age_us;
+	uint32_t timeslot_blocked;
+	uint32_t timeslot_cancelled;
+	uint32_t timeslot_overstayed;
 };
 
 int radio_sync_init(uint8_t channel, uint32_t network_id);

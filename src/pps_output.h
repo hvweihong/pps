@@ -10,6 +10,7 @@ struct pps_output_stats {
 	uint32_t late_schedules;
 	uint32_t pulses;
 	uint32_t phase_resets;
+	uint8_t phase_pending;
 };
 
 int pps_output_init(uint32_t pulse_width_us);

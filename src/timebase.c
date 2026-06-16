@@ -4,10 +4,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/notify.h>
 
-#include <hal/nrf_clock.h>
 #include <hal/nrf_timer.h>
 #include <nrfx.h>
 
@@ -28,12 +29,32 @@ static timebase_compare_handler_t compare_handler;
 static void *compare_handler_data;
 static bool initialized;
 
-static void hfclk_start(void)
+static int hfclk_start(void)
 {
-	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_HFCLKSTARTED);
-	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_HFCLKSTART);
-	while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_HFCLKSTARTED)) {
+	struct onoff_manager *clk_mgr =
+		z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	struct onoff_client clk_cli;
+	int err;
+	int res;
+
+	if (clk_mgr == NULL) {
+		return -ENODEV;
 	}
+
+	sys_notify_init_spinwait(&clk_cli.notify);
+	err = onoff_request(clk_mgr, &clk_cli);
+	if (err < 0) {
+		return err;
+	}
+
+	do {
+		err = sys_notify_fetch_result(&clk_cli.notify, &res);
+		if (err == 0 && res != 0) {
+			return res;
+		}
+	} while (err != 0);
+
+	return 0;
 }
 
 static uint64_t compose_now(uint32_t high, uint32_t low)
@@ -80,7 +101,11 @@ int timebase_init(void)
 		return 0;
 	}
 
-	hfclk_start();
+	int ret = hfclk_start();
+
+	if (ret != 0) {
+		return ret;
+	}
 
 	nrf_timer_task_trigger(TIMEBASE_TIMER, NRF_TIMER_TASK_STOP);
 	nrf_timer_task_trigger(TIMEBASE_TIMER, NRF_TIMER_TASK_CLEAR);

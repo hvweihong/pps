@@ -71,6 +71,25 @@ static uint32_t pps_timer_task_address(nrf_timer_task_t task)
 	return nrf_timer_task_address_get(PPS_TIMER, task);
 }
 
+static void pps_periodic_output_enable(bool enable)
+{
+	if (enable) {
+		nrf_timer_event_clear(
+			PPS_TIMER, pps_timer_event(PPS_TIMER_PERIOD_CHANNEL));
+		nrfx_gppi_conn_enable(pps_period_set_handle);
+		nrfx_gppi_conn_enable(pps_period_clear_handle);
+		nrf_timer_int_enable(
+			PPS_TIMER,
+			nrf_timer_compare_int_get(PPS_TIMER_PERIOD_CHANNEL));
+	} else {
+		nrf_timer_int_disable(
+			PPS_TIMER,
+			nrf_timer_compare_int_get(PPS_TIMER_PERIOD_CHANNEL));
+		nrfx_gppi_conn_disable(pps_period_set_handle);
+		nrfx_gppi_conn_disable(pps_period_clear_handle);
+	}
+}
+
 static void pps_timer_init(void)
 {
 	nrf_timer_task_trigger(PPS_TIMER, NRF_TIMER_TASK_STOP);
@@ -87,9 +106,10 @@ static void pps_timer_init(void)
 				     PPS_TIMER_PERIOD_CHANNEL));
 	nrf_timer_int_enable(PPS_TIMER,
 			     nrf_timer_compare_int_get(
-				     PPS_TIMER_PERIOD_CHANNEL) |
-				     nrf_timer_compare_int_get(
-					     PPS_TIMER_FALL_CHANNEL));
+				     PPS_TIMER_FALL_CHANNEL));
+	nrf_timer_int_disable(PPS_TIMER,
+			      nrf_timer_compare_int_get(
+				      PPS_TIMER_PERIOD_CHANNEL));
 
 	for (uint8_t channel = 0; channel < 4u; channel++) {
 		nrf_timer_event_clear(PPS_TIMER, pps_timer_event(channel));
@@ -138,8 +158,8 @@ static int pps_hardware_init(void)
 		return ret;
 	}
 
-	nrfx_gppi_conn_enable(pps_period_set_handle);
-	nrfx_gppi_conn_enable(pps_period_clear_handle);
+	nrfx_gppi_conn_disable(pps_period_set_handle);
+	nrfx_gppi_conn_disable(pps_period_clear_handle);
 	nrfx_gppi_conn_enable(pps_fall_handle);
 	periodic_initialized = true;
 
@@ -183,9 +203,11 @@ static void pps_compare_handler(uint8_t channel, uint64_t now_us,
 		stats.scheduled_rise_tick = time_sync_next_epoch_tick_after(
 			stats.epoch_tick, pps_period, stats.last_rise_tick);
 		phase_reset_pending = false;
+		stats.phase_pending = 0u;
 		nrfx_gppi_conn_disable(pps_phase_reset_handle);
 		nrfx_gppi_conn_disable(pps_phase_set_handle);
 		nrfx_gppi_conn_disable(pps_phase_start_handle);
+		pps_periodic_output_enable(true);
 	}
 }
 
@@ -285,22 +307,25 @@ int pps_output_schedule(uint64_t rise_tick)
 		return 0;
 	}
 
-	pending_phase_tick = rise_tick;
-	phase_reset_pending = true;
-	stats.scheduled_rise_tick = rise_tick;
 	if (!phase_reset_initialized) {
-		phase_reset_pending = false;
 		return -EACCES;
 	}
+
+	pending_phase_tick = rise_tick;
+	phase_reset_pending = true;
+	stats.phase_pending = 1u;
+	stats.scheduled_rise_tick = rise_tick;
 
 	int ret = timebase_schedule_compare(PPS_RISE_CHANNEL,
 					    (uint32_t)rise_tick);
 
 	if (ret != 0) {
 		phase_reset_pending = false;
+		stats.phase_pending = 0u;
 		return ret;
 	}
 
+	pps_periodic_output_enable(false);
 	nrfx_gppi_conn_enable(pps_phase_reset_handle);
 	nrfx_gppi_conn_enable(pps_phase_set_handle);
 	nrfx_gppi_conn_enable(pps_phase_start_handle);

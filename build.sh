@@ -2,10 +2,14 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ZEPHYR_WORKSPACE="${ZEPHYR_WORKSPACE:-/home/hv/zephyrproject}"
+NCS_WORKSPACE="${NCS_WORKSPACE:-/home/hv/ncs}"
+ZEPHYR_WORKSPACE="${ZEPHYR_WORKSPACE:-${NCS_WORKSPACE}}"
 ZEPHYR_BASE="${ZEPHYR_BASE:-${ZEPHYR_WORKSPACE}/zephyr}"
-ZEPHYR_VENV="${ZEPHYR_VENV:-${ZEPHYR_WORKSPACE}/.venv312}"
-ZEPHYR_SDK_INSTALL_DIR="${ZEPHYR_SDK_INSTALL_DIR:-/home/hv/zephyr-sdk-1.0.1}"
+ZEPHYR_VENV="${ZEPHYR_VENV:-${ZEPHYR_WORKSPACE}/.venv}"
+if [[ ! -x "${ZEPHYR_VENV}/bin/west" && -x "/home/hv/zephyrproject/.venv312/bin/west" ]]; then
+	ZEPHYR_VENV="/home/hv/zephyrproject/.venv312"
+fi
+ZEPHYR_SDK_INSTALL_DIR="${ZEPHYR_SDK_INSTALL_DIR:-/home/hv/zephyr-sdk-0.17.4}"
 BOARD="${BOARD:-xiao_ble/nrf52840}"
 BUILD_DIR="${BUILD_DIR:-}"
 PRISTINE="always"
@@ -23,6 +27,7 @@ Options:
   -h, --help              Show this help.
 
 Environment overrides:
+  NCS_WORKSPACE            Default: ${NCS_WORKSPACE}
   ZEPHYR_WORKSPACE         Default: ${ZEPHYR_WORKSPACE}
   ZEPHYR_BASE              Default: ${ZEPHYR_BASE}
   ZEPHYR_VENV              Default: ${ZEPHYR_VENV}
@@ -79,6 +84,15 @@ fi
 
 if [[ ! -d "${ZEPHYR_BASE}" ]]; then
 	echo "error: ZEPHYR_BASE does not exist: ${ZEPHYR_BASE}" >&2
+	echo "This app now builds against nRF Connect SDK because it uses MPSL." >&2
+	echo "Set NCS_WORKSPACE or ZEPHYR_WORKSPACE to a synced NCS workspace." >&2
+	exit 1
+fi
+
+if [[ ! -f "${ZEPHYR_WORKSPACE}/nrfxlib/mpsl/include/mpsl_timeslot.h" ]]; then
+	echo "error: MPSL headers not found in ${ZEPHYR_WORKSPACE}/nrfxlib" >&2
+	echo "Run: west init -m https://github.com/nrfconnect/sdk-nrf --mr v3.3.1 ${NCS_WORKSPACE}" >&2
+	echo "Then: (cd ${NCS_WORKSPACE} && west update)" >&2
 	exit 1
 fi
 
@@ -108,6 +122,7 @@ echo "Board: ${BOARD}"
 echo "Build dir: ${BUILD_DIR}"
 
 exec "${WEST}" build \
+	--no-sysbuild \
 	-p "${PRISTINE}" \
 	-b "${BOARD}" \
 	"${APP_DIR}" \

@@ -43,6 +43,21 @@ config TIME_SYNC_RADIO_TXEN_TO_ADDRESS_US
 	int "Master TXEN to RADIO ADDRESS reference delay in microseconds"
 	default 88
 
+config TIME_SYNC_TIMESLOT_LENGTH_US
+	int "MPSL raw RADIO timeslot length in microseconds"
+	default 100000
+	range 100 100000
+
+config TIME_SYNC_TIMESLOT_END_MARGIN_US
+	int "Margin before MPSL timeslot end used to stop raw RADIO"
+	default 250
+	range 100 10000
+
+config TIME_SYNC_TIMESLOT_REQUEST_TIMEOUT_US
+	int "Timeout for earliest MPSL timeslot requests"
+	default 200000
+	range 1000 256000000
+
 config TIME_SYNC_STATUS_INTERVAL_MS
 	int "Status log interval in milliseconds"
 	default 1000

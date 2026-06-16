@@ -18,27 +18,59 @@
 LOG_MODULE_REGISTER(time_sync_app, LOG_LEVEL_INF);
 
 #define STATUS_SLEEP_MS 10
-#define MASTER_BEACON_ARM_AHEAD_US 15000u
+#define MASTER_BEACON_DEFAULT_ARM_AHEAD_US 80000u
+#define MASTER_BEACON_TIMESLOT_GUARD_US 3000u
+#define MASTER_BEACON_INTERVAL_GUARD_US 5000u
 #define MASTER_BEACON_LATE_US 250u
 #define SLAVE_PPS_KEEP_PENDING_WINDOW_US 20000u
 #define SLAVE_PPS_MIN_ARM_AHEAD_US 1000u
 
 #if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
+static uint32_t master_beacon_arm_ahead_us(void)
+{
+	uint32_t max_arm_ahead = TIME_SYNC_TIMESLOT_LENGTH_US_VALUE;
+	uint32_t timeslot_overhead = TIME_SYNC_TIMESLOT_END_MARGIN_US_VALUE +
+				     MASTER_BEACON_TIMESLOT_GUARD_US;
+
+	if (max_arm_ahead > timeslot_overhead) {
+		max_arm_ahead -= timeslot_overhead;
+	} else {
+		max_arm_ahead = MASTER_BEACON_TIMESLOT_GUARD_US;
+	}
+
+	if (TIME_SYNC_INTERVAL_US_VALUE > MASTER_BEACON_INTERVAL_GUARD_US) {
+		uint32_t interval_arm_ahead =
+			TIME_SYNC_INTERVAL_US_VALUE -
+			MASTER_BEACON_INTERVAL_GUARD_US;
+
+		if (max_arm_ahead > interval_arm_ahead) {
+			max_arm_ahead = interval_arm_ahead;
+		}
+	} else {
+		max_arm_ahead = TIME_SYNC_INTERVAL_US_VALUE / 2u;
+	}
+
+	return max_arm_ahead < MASTER_BEACON_DEFAULT_ARM_AHEAD_US ?
+		max_arm_ahead : MASTER_BEACON_DEFAULT_ARM_AHEAD_US;
+}
+
 static void master_loop(void)
 {
 	uint16_t seq = 0;
 	uint64_t now = timebase_now_us();
-	uint64_t next_beacon = now + MASTER_BEACON_ARM_AHEAD_US;
+	uint32_t arm_ahead_us = master_beacon_arm_ahead_us();
+	uint64_t next_beacon = now + arm_ahead_us;
 	uint64_t next_pps = time_sync_next_period_tick(next_beacon,
 						       TIME_SYNC_PPS_PERIOD_US_VALUE);
 	uint64_t next_status = next_beacon;
 	int ret;
 
 	LOG_INF("role=master network=0x%08x rf_channel=%u interval=%uus "
-		"txen_to_address=%uus",
+		"txen_to_address=%uus tx_arm_ahead=%uus",
 		TIME_SYNC_NETWORK_ID_VALUE, TIME_SYNC_RF_CHANNEL_VALUE,
 		TIME_SYNC_INTERVAL_US_VALUE,
-		TIME_SYNC_RADIO_TXEN_TO_ADDRESS_US_VALUE);
+		TIME_SYNC_RADIO_TXEN_TO_ADDRESS_US_VALUE,
+		arm_ahead_us);
 
 	ret = pps_output_start_periodic(next_pps,
 					TIME_SYNC_PPS_PERIOD_US_VALUE);
@@ -58,8 +90,7 @@ static void master_loop(void)
 			next_beacon += missed * TIME_SYNC_INTERVAL_US_VALUE;
 		}
 
-		if ((int64_t)(now + MASTER_BEACON_ARM_AHEAD_US -
-			      next_beacon) >= 0) {
+		if ((int64_t)(now + arm_ahead_us - next_beacon) >= 0) {
 			uint64_t master_tx_tick = next_beacon +
 				TIME_SYNC_RADIO_TXEN_TO_ADDRESS_US_VALUE;
 			uint64_t pps_tick = time_sync_next_epoch_tick_after(
