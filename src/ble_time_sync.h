@@ -18,6 +18,7 @@ struct ble_time_sync_snapshot {
 	bool peer;
 	bool notify_enabled;
 	uint8_t connection_count;
+	uint8_t peer_count;
 	uint32_t start_attempts;
 	uint32_t scan_seen;
 	uint32_t scan_match;
@@ -25,6 +26,15 @@ struct ble_time_sync_snapshot {
 	uint32_t scan_reject_filter;
 	uint32_t connect_attempts;
 	uint32_t connect_failures;
+	uint32_t gatt_tx_found;
+	uint32_t gatt_tx_ccc_found;
+	uint32_t gatt_subscribe_attempts;
+	uint32_t gatt_subscribe_failures;
+	uint32_t gatt_notify_subscribed;
+	uint32_t gatt_rx_found;
+	uint32_t gatt_write_attempts;
+	uint32_t gatt_write_failures;
+	uint32_t gatt_write_successes;
 	int last_error;
 };
 

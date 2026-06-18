@@ -44,6 +44,15 @@ static atomic_t scan_reject_type;
 static atomic_t scan_reject_filter;
 static atomic_t connect_attempts;
 static atomic_t connect_failures;
+static atomic_t gatt_tx_found;
+static atomic_t gatt_tx_ccc_found;
+static atomic_t gatt_subscribe_attempts;
+static atomic_t gatt_subscribe_failures;
+static atomic_t gatt_notify_subscribed;
+static atomic_t gatt_rx_found;
+static atomic_t gatt_write_attempts;
+static atomic_t gatt_write_failures;
+static atomic_t gatt_write_successes;
 static const uint8_t service_uuid_ad[] = { BT_UUID_TIME_SYNC_SERVICE_VAL };
 static const struct bt_le_scan_param scan_param =
 	BT_LE_SCAN_PARAM_INIT(BT_LE_SCAN_TYPE_ACTIVE, BT_LE_SCAN_OPT_NONE,
@@ -105,11 +114,14 @@ static int write_rx_text(struct peer_state *peer, const char *text)
 		return -EINVAL;
 	}
 
+	atomic_inc(&gatt_write_attempts);
 	ret = bt_gatt_write_without_response(peer->conn, peer->rx_handle, text,
 					     strlen(text), false);
 	if (ret != 0) {
+		atomic_inc(&gatt_write_failures);
 		LOG_WRN("BLE write failed: %d text=%s", ret, text);
 	} else {
+		atomic_inc(&gatt_write_successes);
 		LOG_INF("BLE write queued: %s", text);
 	}
 
@@ -161,10 +173,12 @@ static void subscribe_complete(struct bt_conn *conn, uint8_t err,
 
 	if (err != 0) {
 		LOG_WRN("BLE notify subscribe failed att_err=%u", err);
+		atomic_inc(&gatt_subscribe_failures);
 		return;
 	}
 
 	atomic_set(&peer->notify_subscribed, 1);
+	atomic_inc(&gatt_notify_subscribed);
 	LOG_INF("BLE notify subscribe complete");
 	discover_rx_start(conn);
 }
@@ -208,6 +222,7 @@ static uint8_t discover_tx_ccc(struct bt_conn *conn,
 		return BT_GATT_ITER_STOP;
 	}
 
+	atomic_inc(&gatt_tx_ccc_found);
 	memset(params, 0, sizeof(*params));
 	peer->subscribe_params.notify = notify_rx;
 	peer->subscribe_params.subscribe = subscribe_complete;
@@ -215,8 +230,10 @@ static uint8_t discover_tx_ccc(struct bt_conn *conn,
 	peer->subscribe_params.value_handle = peer->tx_value_handle;
 	peer->subscribe_params.ccc_handle = attr->handle;
 
+	atomic_inc(&gatt_subscribe_attempts);
 	ret = bt_gatt_subscribe(conn, &peer->subscribe_params);
 	if (ret != 0 && ret != -EALREADY) {
+		atomic_inc(&gatt_subscribe_failures);
 		LOG_WRN("BLE notify subscribe failed: %d", ret);
 	} else {
 		LOG_INF("BLE TX notify subscribe queued");
@@ -242,6 +259,7 @@ static uint8_t discover_tx_char(struct bt_conn *conn,
 		return BT_GATT_ITER_STOP;
 	}
 
+	atomic_inc(&gatt_tx_found);
 	peer->tx_value_handle = bt_gatt_attr_value_handle(attr);
 	memset(params, 0, sizeof(*params));
 
@@ -274,6 +292,7 @@ static uint8_t discover_rx(struct bt_conn *conn, const struct bt_gatt_attr *attr
 		return BT_GATT_ITER_STOP;
 	}
 
+	atomic_inc(&gatt_rx_found);
 	peer->rx_handle = bt_gatt_attr_value_handle(attr);
 	memset(params, 0, sizeof(*params));
 	LOG_INF("BLE RX characteristic handle=%u", peer->rx_handle);
@@ -291,7 +310,7 @@ static void discover_rx_start(struct bt_conn *conn)
 		return;
 	}
 
-	peer->discover_params.uuid = BT_UUID_TIME_SYNC_RX;
+	peer->discover_params.uuid = &bt_uuid_time_sync_rx.uuid;
 	peer->discover_params.func = discover_rx;
 	peer->discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
 	peer->discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
@@ -312,7 +331,7 @@ static void discover_tx(struct bt_conn *conn)
 		return;
 	}
 
-	peer->discover_params.uuid = BT_UUID_TIME_SYNC_TX;
+	peer->discover_params.uuid = &bt_uuid_time_sync_tx.uuid;
 	peer->discover_params.func = discover_tx_char;
 	peer->discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
 	peer->discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
@@ -461,7 +480,6 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 
 	LOG_INF("BLE central connected");
 	discover_tx(conn);
-	scan_start();
 }
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
@@ -493,8 +511,33 @@ int ble_time_sync_client_start(void)
 bool ble_time_sync_client_has_peer(void)
 {
 #if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
+	return ble_time_sync_client_peer_count() > 0u;
+#endif
+
+	return false;
+}
+
+uint8_t ble_time_sync_client_peer_count(void)
+{
+	uint8_t count = 0u;
+
+#if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
 	for (size_t i = 0; i < ARRAY_SIZE(peers); i++) {
 		if (peers[i].in_use) {
+			count++;
+		}
+	}
+#endif
+
+	return count;
+}
+
+bool ble_time_sync_client_notify_subscribed(void)
+{
+#if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
+	for (size_t i = 0; i < ARRAY_SIZE(peers); i++) {
+		if (peers[i].in_use &&
+		    atomic_get(&peers[i].notify_subscribed) != 0) {
 			return true;
 		}
 	}
@@ -527,6 +570,21 @@ void ble_time_sync_client_get_scan_stats(
 		(uint32_t)atomic_get(&scan_reject_filter);
 	stats->connect_attempts = (uint32_t)atomic_get(&connect_attempts);
 	stats->connect_failures = (uint32_t)atomic_get(&connect_failures);
+	stats->gatt_tx_found = (uint32_t)atomic_get(&gatt_tx_found);
+	stats->gatt_tx_ccc_found = (uint32_t)atomic_get(&gatt_tx_ccc_found);
+	stats->gatt_subscribe_attempts =
+		(uint32_t)atomic_get(&gatt_subscribe_attempts);
+	stats->gatt_subscribe_failures =
+		(uint32_t)atomic_get(&gatt_subscribe_failures);
+	stats->gatt_notify_subscribed =
+		(uint32_t)atomic_get(&gatt_notify_subscribed);
+	stats->gatt_rx_found = (uint32_t)atomic_get(&gatt_rx_found);
+	stats->gatt_write_attempts =
+		(uint32_t)atomic_get(&gatt_write_attempts);
+	stats->gatt_write_failures =
+		(uint32_t)atomic_get(&gatt_write_failures);
+	stats->gatt_write_successes =
+		(uint32_t)atomic_get(&gatt_write_successes);
 #else
 	memset(stats, 0, sizeof(*stats));
 #endif

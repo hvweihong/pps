@@ -97,6 +97,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 	}
 
 	atomic_inc(&connected_count);
+#if defined(CONFIG_TIME_SYNC_ROLE_SLAVE)
+	atomic_set(&ble_advertising, 0);
+#endif
 	LOG_INF("BLE connected count=%u", (uint32_t)atomic_get(&connected_count));
 }
 
@@ -255,12 +258,15 @@ void ble_time_sync_get_snapshot(struct ble_time_sync_snapshot *snapshot)
 	snapshot->started = atomic_get(&started) != 0;
 	snapshot->connected = ble_time_sync_connected();
 	snapshot->connection_count = ble_time_sync_connection_count();
+	snapshot->peer_count = 0u;
 	snapshot->start_attempts = (uint32_t)atomic_get(&start_attempts);
 	snapshot->last_error = (int)atomic_get(&last_error);
 
 #if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
 	snapshot->scanning = ble_time_sync_client_scanning();
 	snapshot->peer = ble_time_sync_client_has_peer();
+	snapshot->notify_enabled = ble_time_sync_client_notify_subscribed();
+	snapshot->peer_count = ble_time_sync_client_peer_count();
 	struct ble_time_sync_client_scan_stats scan_stats;
 
 	ble_time_sync_client_get_scan_stats(&scan_stats);
@@ -270,6 +276,18 @@ void ble_time_sync_get_snapshot(struct ble_time_sync_snapshot *snapshot)
 	snapshot->scan_reject_filter = scan_stats.scan_reject_filter;
 	snapshot->connect_attempts = scan_stats.connect_attempts;
 	snapshot->connect_failures = scan_stats.connect_failures;
+	snapshot->gatt_tx_found = scan_stats.gatt_tx_found;
+	snapshot->gatt_tx_ccc_found = scan_stats.gatt_tx_ccc_found;
+	snapshot->gatt_subscribe_attempts =
+		scan_stats.gatt_subscribe_attempts;
+	snapshot->gatt_subscribe_failures =
+		scan_stats.gatt_subscribe_failures;
+	snapshot->gatt_notify_subscribed =
+		scan_stats.gatt_notify_subscribed;
+	snapshot->gatt_rx_found = scan_stats.gatt_rx_found;
+	snapshot->gatt_write_attempts = scan_stats.gatt_write_attempts;
+	snapshot->gatt_write_failures = scan_stats.gatt_write_failures;
+	snapshot->gatt_write_successes = scan_stats.gatt_write_successes;
 #else
 	snapshot->scanning = false;
 	snapshot->peer = false;
@@ -279,13 +297,22 @@ void ble_time_sync_get_snapshot(struct ble_time_sync_snapshot *snapshot)
 	snapshot->scan_reject_filter = 0;
 	snapshot->connect_attempts = 0;
 	snapshot->connect_failures = 0;
+	snapshot->gatt_tx_found = 0;
+	snapshot->gatt_tx_ccc_found = 0;
+	snapshot->gatt_subscribe_attempts = 0;
+	snapshot->gatt_subscribe_failures = 0;
+	snapshot->gatt_notify_subscribed = 0;
+	snapshot->gatt_rx_found = 0;
+	snapshot->gatt_write_attempts = 0;
+	snapshot->gatt_write_failures = 0;
+	snapshot->gatt_write_successes = 0;
 #endif
 
 #if defined(CONFIG_TIME_SYNC_ROLE_SLAVE)
 	snapshot->advertising = atomic_get(&ble_advertising) != 0;
 	snapshot->notify_enabled = ble_time_sync_service_notify_enabled();
+	snapshot->peer_count = snapshot->connection_count;
 #else
 	snapshot->advertising = false;
-	snapshot->notify_enabled = false;
 #endif
 }

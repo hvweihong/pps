@@ -17,4 +17,9 @@
 #define BT_UUID_TIME_SYNC_TX BT_UUID_DECLARE_128(BT_UUID_TIME_SYNC_TX_VAL)
 #define BT_UUID_TIME_SYNC_STATUS BT_UUID_DECLARE_128(BT_UUID_TIME_SYNC_STATUS_VAL)
 
+extern const struct bt_uuid_128 bt_uuid_time_sync_service;
+extern const struct bt_uuid_128 bt_uuid_time_sync_rx;
+extern const struct bt_uuid_128 bt_uuid_time_sync_tx;
+extern const struct bt_uuid_128 bt_uuid_time_sync_status;
+
 #endif

@@ -457,18 +457,20 @@ UF2 文件不需要重命名。
 
 ## 运行日志
 
-应用默认每秒输出一次状态日志。
+应用默认每秒输出一次状态日志，按子系统拆成多行，避免同步、PPS、RADIO、
+BLE 状态全部糅杂在一条长日志里。
 
-master 日志示例：
-
-```text
-role=master seq=<n> state=locked offset=0us ... pps=<count> tx=<count> tx_err=<us> tx_ref=<us> ble_conn=<0|1>
-```
-
-slave 日志示例：
+日志示例：
 
 ```text
-role=slave seq=<n> state=<state> offset=<us> drift=<ppm> missed=<n> rx=<count> rx_mode=<mode> rx_win=<us> ble_conn=<0|1>
+sync_status: <role> seq=<n> state=<state> offset=<us> drift=<ppm> missed=<n> age=<us> next_pps=<us> ble_conn=<0|1>
+pps_status: <role> sched=<us> last=<us> epoch=<us> pulses=<n> phase=<n> pending=<0|1> late=<n>
+radio_tx_status: <role> tx=<n> tx_seq=<n> tx_err=<us> tx_ref=<us> tx_len=<n> ...
+radio_rx_status: <role> rx=<n> crc_err=<n> decode_err=<n> rx_mode=<mode> rx_win=<us> ...
+timeslot_status: <role> ts_block=<n> ts_cancel=<n> ts_over=<n>
+ble_link: <role> init=<0|1> ready=<0|1> started=<0|1> conn=<0|1> scan=<0|1> adv=<0|1> peer=<0|1> notify=<0|1> ...
+ble_scan: <role> seen=<n> match=<n> type_drop=<n> filter_drop=<n> conn_req=<n> conn_fail=<n>
+ble_gatt: <role> tx=<n> ccc=<n> sub=<n> sub_fail=<n> notify_sub=<n> rx=<n> write=<n> write_ok=<n> write_fail=<n>
 ```
 
 slave 预期锁定流程：
@@ -500,13 +502,20 @@ unlocked -> acquiring -> locked
 | `rx_open` | 已打开 RX window 次数 |
 | `rx_skip` | RX window 被 MPSL blocked/cancelled 或跳过次数 |
 | `rx_late` | 主循环发现窗口已经太晚而放弃的次数 |
-| `ble_conn` | 当前 BLE 连接状态 |
-| `ble_scan_seen` | master 扫描回调收到的 BLE 广播/扫描响应次数 |
-| `ble_scan_match` | master 扫描到符合 UUID 或名称过滤条件的 slave 次数 |
-| `ble_scan_type_drop` | master 因广播类型不可连接而丢弃的扫描事件 |
-| `ble_scan_filter_drop` | master 因 UUID/名称不匹配而丢弃的扫描事件 |
-| `ble_conn_req` | master 发起 BLE 连接的次数 |
-| `ble_conn_fail` | master 连接创建或连接完成失败次数 |
+| `ble_link.conn` | 当前 BLE 连接状态 |
+| `ble_link.notify` | master 是否完成 notify subscription；slave 是否已打开 CCC notify |
+| `ble_scan.seen` | master 扫描回调收到的 BLE 广播/扫描响应次数 |
+| `ble_scan.match` | master 扫描到符合 UUID 或名称过滤条件的 slave 次数 |
+| `ble_scan.type_drop` | master 因广播类型不可连接而丢弃的扫描事件 |
+| `ble_scan.filter_drop` | master 因 UUID/名称不匹配而丢弃的扫描事件 |
+| `ble_scan.conn_req` | master 发起 BLE 连接的次数 |
+| `ble_scan.conn_fail` | master 连接创建或连接完成失败次数 |
+| `ble_gatt.tx` | master 找到 slave TX notify characteristic 的次数 |
+| `ble_gatt.ccc` | master 找到 TX CCC descriptor 的次数 |
+| `ble_gatt.sub` | master 发起 notify subscribe 的次数 |
+| `ble_gatt.notify_sub` | master notify subscribe 完成次数 |
+| `ble_gatt.rx` | master 找到 slave RX command characteristic 的次数 |
+| `ble_gatt.write_ok` | master 已排队写入 RX command 的次数 |
 | `pps_sched` | 当前计划的下一次 PPS 上升沿 |
 | `pps_last` | 最近一次 PPS 上升沿 |
 | `pending` | 是否正在等待一次 PPS phase reset 生效 |

@@ -9,6 +9,7 @@ target_sources(app PRIVATE
 	src/ble_time_sync.c
 	src/ble_time_sync_client.c
 	src/ble_time_sync_service.c
+	src/ble_time_sync_uuids.c
 	src/time_sync_math.c
 	src/runtime_config.c
 	src/sync_packet.c
