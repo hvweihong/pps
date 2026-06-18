@@ -34,6 +34,14 @@ LOG_MODULE_REGISTER(time_sync_app, LOG_LEVEL_INF);
 #define SLAVE_BLE_START_LOCKED_BEACONS 20u
 #define SLAVE_SLEEP_MS 1
 
+#ifndef APP_GIT_VERSION
+#define APP_GIT_VERSION "unknown"
+#endif
+
+#ifndef APP_LOG_FORMAT_VERSION
+#define APP_LOG_FORMAT_VERSION 1
+#endif
+
 #if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
 static void master_loop(void)
 {
@@ -777,6 +785,9 @@ int main(void)
 		LOG_WRN("heartbeat LED disabled: %d", ret);
 	}
 #endif
+
+	LOG_INF("firmware: git=%s log_format=%u gatt_diag=1",
+		APP_GIT_VERSION, APP_LOG_FORMAT_VERSION);
 
 #if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
 	master_loop();

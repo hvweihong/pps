@@ -463,6 +463,7 @@ BLE 状态全部糅杂在一条长日志里。
 日志示例：
 
 ```text
+firmware: git=<sha> log_format=2 gatt_diag=1
 sync_status: <role> seq=<n> state=<state> offset=<us> drift=<ppm> missed=<n> age=<us> next_pps=<us> ble_conn=<0|1>
 pps_status: <role> sched=<us> last=<us> epoch=<us> pulses=<n> phase=<n> pending=<0|1> late=<n>
 radio_tx_status: <role> tx=<n> tx_seq=<n> tx_err=<us> tx_ref=<us> tx_len=<n> ...
@@ -502,6 +503,9 @@ unlocked -> acquiring -> locked
 | `rx_open` | 已打开 RX window 次数 |
 | `rx_skip` | RX window 被 MPSL blocked/cancelled 或跳过次数 |
 | `rx_late` | 主循环发现窗口已经太晚而放弃的次数 |
+| `firmware.git` | 启动时打印的固件 git 版本；带 `-dirty` 表示构建时工作区有未提交改动 |
+| `firmware.log_format` | 状态日志格式版本；当前拆分日志为 `2` |
+| `firmware.gatt_diag` | 是否包含 BLE GATT hello 诊断计数 |
 | `ble_link.conn` | 当前 BLE 连接状态 |
 | `ble_link.notify` | master 是否完成 notify subscription；slave 是否已打开 CCC notify |
 | `ble_scan.seen` | master 扫描回调收到的 BLE 广播/扫描响应次数 |
