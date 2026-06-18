@@ -20,6 +20,11 @@ struct ble_time_sync_client_scan_stats {
 	uint32_t gatt_write_attempts;
 	uint32_t gatt_write_failures;
 	uint32_t gatt_write_successes;
+	uint32_t gatt_write_completions;
+	uint32_t gatt_write_retries;
+	uint32_t gatt_write_inflight;
+	uint32_t gatt_write_step;
+	int gatt_last_write_error;
 };
 
 int ble_time_sync_client_start(void);

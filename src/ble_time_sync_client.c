@@ -18,6 +18,16 @@ LOG_MODULE_REGISTER(ble_time_sync_client, LOG_LEVEL_INF);
 
 #if defined(CONFIG_TIME_SYNC_ROLE_MASTER)
 #define SLAVE_NAME_SUFFIX "-SLAVE"
+#define GATT_WRITE_RETRY_DELAY_MS 100
+#define GATT_WRITE_NEXT_DELAY_MS 10
+
+enum gatt_config_step {
+	GATT_CONFIG_IDLE,
+	GATT_CONFIG_SET_GROUP,
+	GATT_CONFIG_START_SYNC,
+	GATT_CONFIG_HELLO,
+	GATT_CONFIG_DONE,
+};
 
 struct peer_state {
 	struct bt_conn *conn;
@@ -27,6 +37,9 @@ struct peer_state {
 	uint16_t tx_value_handle;
 	atomic_t notify_subscribed;
 	atomic_t configured;
+	atomic_t write_inflight;
+	enum gatt_config_step write_step;
+	char write_text[96];
 	bool in_use;
 };
 
@@ -53,6 +66,11 @@ static atomic_t gatt_rx_found;
 static atomic_t gatt_write_attempts;
 static atomic_t gatt_write_failures;
 static atomic_t gatt_write_successes;
+static atomic_t gatt_write_completions;
+static atomic_t gatt_write_retries;
+static atomic_t gatt_write_inflight;
+static atomic_t gatt_write_step;
+static atomic_t gatt_last_write_error;
 static const uint8_t service_uuid_ad[] = { BT_UUID_TIME_SYNC_SERVICE_VAL };
 static const struct bt_le_scan_param scan_param =
 	BT_LE_SCAN_PARAM_INIT(BT_LE_SCAN_TYPE_ACTIVE, BT_LE_SCAN_OPT_NONE,
@@ -66,6 +84,9 @@ static const struct bt_le_conn_param conn_param =
 static void scan_start(void);
 static void discover_tx(struct bt_conn *conn);
 static void discover_rx_start(struct bt_conn *conn);
+static void gatt_write_work_handler(struct k_work *work);
+
+K_WORK_DELAYABLE_DEFINE(gatt_write_work, gatt_write_work_handler);
 
 static struct peer_state *peer_for_conn(struct bt_conn *conn)
 {
@@ -84,6 +105,7 @@ static struct peer_state *peer_alloc(struct bt_conn *conn)
 		if (!peers[i].in_use) {
 			memset(&peers[i], 0, sizeof(peers[i]));
 			peers[i].conn = bt_conn_ref(conn);
+			peers[i].write_step = GATT_CONFIG_DONE;
 			peers[i].in_use = true;
 			return &peers[i];
 		}
@@ -92,17 +114,112 @@ static struct peer_state *peer_alloc(struct bt_conn *conn)
 	return NULL;
 }
 
+static void clear_write_inflight(struct peer_state *peer)
+{
+	if (peer == NULL ||
+	    atomic_cas(&peer->write_inflight, 1, 0) == false) {
+		return;
+	}
+
+	if (atomic_get(&gatt_write_inflight) > 0) {
+		atomic_dec(&gatt_write_inflight);
+	}
+}
+
 static void peer_release(struct peer_state *peer)
 {
 	if (peer == NULL) {
 		return;
 	}
 
+	clear_write_inflight(peer);
+
 	if (peer->conn != NULL) {
 		bt_conn_unref(peer->conn);
 	}
 
 	memset(peer, 0, sizeof(*peer));
+}
+
+static struct peer_state *peer_pending_write(void)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(peers); i++) {
+		if (peers[i].in_use &&
+		    peers[i].write_step != GATT_CONFIG_DONE) {
+			return &peers[i];
+		}
+	}
+
+	return NULL;
+}
+
+static bool write_error_is_retryable(int ret)
+{
+	return ret == -ENOMEM || ret == -EAGAIN || ret == -EBUSY;
+}
+
+static void schedule_gatt_write_retry(void)
+{
+	atomic_inc(&gatt_write_retries);
+	(void)k_work_schedule(&gatt_write_work,
+			      K_MSEC(GATT_WRITE_RETRY_DELAY_MS));
+}
+
+static void schedule_gatt_write_next(void)
+{
+	(void)k_work_schedule(&gatt_write_work,
+			      K_MSEC(GATT_WRITE_NEXT_DELAY_MS));
+}
+
+static const char *write_step_text(struct peer_state *peer)
+{
+	if (peer == NULL) {
+		return NULL;
+	}
+
+	switch (peer->write_step) {
+	case GATT_CONFIG_SET_GROUP:
+		snprintk(peer->write_text, sizeof(peer->write_text),
+			 "SET_GROUP network=0x%08x channel=%u interval=%u",
+			 TIME_SYNC_NETWORK_ID_VALUE,
+			 TIME_SYNC_RF_CHANNEL_VALUE,
+			 TIME_SYNC_INTERVAL_US_VALUE);
+		return peer->write_text;
+	case GATT_CONFIG_START_SYNC:
+		return "START_SYNC";
+	case GATT_CONFIG_HELLO:
+		return "HELLO_FROM_MASTER hello world";
+	case GATT_CONFIG_DONE:
+	default:
+		return NULL;
+	}
+}
+
+static void gatt_write_complete(struct bt_conn *conn, void *user_data)
+{
+	struct peer_state *peer = user_data;
+
+	if (peer == NULL || !peer->in_use || peer->conn != conn) {
+		return;
+	}
+
+	clear_write_inflight(peer);
+	atomic_inc(&gatt_write_completions);
+	atomic_set(&gatt_last_write_error, 0);
+
+	if (peer->write_step < GATT_CONFIG_DONE) {
+		peer->write_step =
+			(enum gatt_config_step)(peer->write_step + 1);
+		atomic_set(&gatt_write_step, (atomic_val_t)peer->write_step);
+	}
+
+	if (peer->write_step == GATT_CONFIG_DONE) {
+		LOG_INF("BLE group config and hello sent handle=%u",
+			peer->rx_handle);
+		return;
+	}
+
+	schedule_gatt_write_next();
 }
 
 static int write_rx_text(struct peer_state *peer, const char *text)
@@ -115,49 +232,72 @@ static int write_rx_text(struct peer_state *peer, const char *text)
 	}
 
 	atomic_inc(&gatt_write_attempts);
-	ret = bt_gatt_write_without_response(peer->conn, peer->rx_handle, text,
-					     strlen(text), false);
+	atomic_set(&peer->write_inflight, 1);
+	atomic_inc(&gatt_write_inflight);
+	ret = bt_gatt_write_without_response_cb(peer->conn, peer->rx_handle,
+						text, strlen(text), false,
+						gatt_write_complete, peer);
 	if (ret != 0) {
+		clear_write_inflight(peer);
 		atomic_inc(&gatt_write_failures);
-		LOG_WRN("BLE write failed: %d text=%s", ret, text);
+		atomic_set(&gatt_last_write_error, ret);
+		LOG_WRN("BLE write failed: %d step=%u text=%s", ret,
+			(uint32_t)peer->write_step, text);
 	} else {
 		atomic_inc(&gatt_write_successes);
-		LOG_INF("BLE write queued: %s", text);
+		LOG_INF("BLE write queued step=%u text=%s",
+			(uint32_t)peer->write_step, text);
 	}
 
 	return ret;
 }
 
-static void write_group_config(struct peer_state *peer)
+static void gatt_write_work_handler(struct k_work *work)
 {
-	char cmd[96];
+	struct peer_state *peer;
+	const char *text;
 	int ret;
 
+	ARG_UNUSED(work);
+
+	peer = peer_pending_write();
+	if (peer == NULL || peer->conn == NULL || peer->rx_handle == 0u ||
+	    atomic_get(&peer->notify_subscribed) == 0 ||
+	    peer->write_step == GATT_CONFIG_DONE ||
+	    atomic_get(&peer->write_inflight) != 0) {
+		return;
+	}
+
+	text = write_step_text(peer);
+	if (text == NULL) {
+		return;
+	}
+
+	atomic_set(&gatt_write_step, (atomic_val_t)peer->write_step);
+	ret = write_rx_text(peer, text);
+	if (ret != 0) {
+		if (write_error_is_retryable(ret)) {
+			schedule_gatt_write_retry();
+		} else {
+			atomic_clear_bit(&peer->configured, 0);
+			LOG_WRN("BLE write stopped after non-retryable error: %d",
+				ret);
+		}
+		return;
+	}
+}
+
+static void write_group_config(struct peer_state *peer)
+{
 	if (peer == NULL || peer->conn == NULL || peer->rx_handle == 0u ||
 	    atomic_get(&peer->notify_subscribed) == 0 ||
 	    atomic_test_and_set_bit(&peer->configured, 0)) {
 		return;
 	}
 
-	snprintk(cmd, sizeof(cmd),
-		 "SET_GROUP network=0x%08x channel=%u interval=%u",
-		 TIME_SYNC_NETWORK_ID_VALUE, TIME_SYNC_RF_CHANNEL_VALUE,
-		 TIME_SYNC_INTERVAL_US_VALUE);
-
-	ret = write_rx_text(peer, cmd);
-	if (ret != 0) {
-		atomic_clear_bit(&peer->configured, 0);
-		return;
-	}
-
-	ret = write_rx_text(peer, "START_SYNC");
-	if (ret != 0) {
-		atomic_clear_bit(&peer->configured, 0);
-		return;
-	}
-
-	(void)write_rx_text(peer, "HELLO_FROM_MASTER hello world");
-	LOG_INF("BLE group config written handle=%u", peer->rx_handle);
+	peer->write_step = GATT_CONFIG_SET_GROUP;
+	atomic_set(&gatt_write_step, (atomic_val_t)peer->write_step);
+	schedule_gatt_write_next();
 }
 
 static void subscribe_complete(struct bt_conn *conn, uint8_t err,
@@ -585,6 +725,16 @@ void ble_time_sync_client_get_scan_stats(
 		(uint32_t)atomic_get(&gatt_write_failures);
 	stats->gatt_write_successes =
 		(uint32_t)atomic_get(&gatt_write_successes);
+	stats->gatt_write_completions =
+		(uint32_t)atomic_get(&gatt_write_completions);
+	stats->gatt_write_retries =
+		(uint32_t)atomic_get(&gatt_write_retries);
+	stats->gatt_write_inflight =
+		(uint32_t)atomic_get(&gatt_write_inflight);
+	stats->gatt_write_step =
+		(uint32_t)atomic_get(&gatt_write_step);
+	stats->gatt_last_write_error =
+		(int)atomic_get(&gatt_last_write_error);
 #else
 	memset(stats, 0, sizeof(*stats));
 #endif

@@ -12,6 +12,11 @@ rg -q "gatt_rx_found" "$repo_root/src/ble_time_sync_client.c"
 rg -q "gatt_write_attempts" "$repo_root/src/ble_time_sync_client.c"
 rg -q "gatt_write_failures" "$repo_root/src/ble_time_sync_client.c"
 rg -q "gatt_write_successes" "$repo_root/src/ble_time_sync_client.c"
+rg -q "gatt_write_completions" "$repo_root/src/ble_time_sync_client.c"
+rg -q "gatt_write_retries" "$repo_root/src/ble_time_sync_client.c"
+rg -q "gatt_last_write_error" "$repo_root/src/ble_time_sync_client.c"
+rg -q "bt_gatt_write_without_response_cb" "$repo_root/src/ble_time_sync_client.c"
+rg -Fq "K_WORK_DELAYABLE_DEFINE(gatt_write_work" "$repo_root/src/ble_time_sync_client.c"
 rg -q "bt_uuid_time_sync_rx" "$repo_root/src/ble_time_sync_uuids.c"
 rg -q "bt_uuid_time_sync_tx" "$repo_root/src/ble_time_sync_uuids.c"
 rg -q "src/ble_time_sync_uuids.c" "$repo_root/CMakeLists.txt"
@@ -22,7 +27,6 @@ rg -q "ble_time_sync_client_notify_subscribed" "$repo_root/src/ble_time_sync_cli
 rg -q "\"ble_gatt:" "$repo_root/src/status.c"
 rg -q "tx=%u ccc=%u sub=%u" "$repo_root/src/status.c"
 rg -q "notify_sub=%u rx=%u write=%u" "$repo_root/src/status.c"
-rg -q "write_ok=%u write_fail=%u" "$repo_root/src/status.c"
 
 python3 - "$repo_root/src/ble_time_sync_client.c" <<'PY'
 from pathlib import Path
@@ -41,4 +45,19 @@ if next_func < 0:
 body_after_connected = source[scan_after_connected:next_func]
 if "scan_start();" in body_after_connected:
 	raise SystemExit("central must not restart scanning after a peer connects")
+PY
+
+python3 - "$repo_root/src/status.c" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1]).read_text()
+strings = "".join(re.findall(r'"([^"]*)"', source))
+for required in (
+	"write_ok=%u write_sent=%u write_fail=%u",
+	"write_retry=%u write_inflight=%u write_step=%u write_last_err=%d",
+):
+	if required not in strings:
+		raise SystemExit(f"missing status field sequence: {required}")
 PY

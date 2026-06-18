@@ -288,6 +288,13 @@ void ble_time_sync_get_snapshot(struct ble_time_sync_snapshot *snapshot)
 	snapshot->gatt_write_attempts = scan_stats.gatt_write_attempts;
 	snapshot->gatt_write_failures = scan_stats.gatt_write_failures;
 	snapshot->gatt_write_successes = scan_stats.gatt_write_successes;
+	snapshot->gatt_write_completions =
+		scan_stats.gatt_write_completions;
+	snapshot->gatt_write_retries = scan_stats.gatt_write_retries;
+	snapshot->gatt_write_inflight = scan_stats.gatt_write_inflight;
+	snapshot->gatt_write_step = scan_stats.gatt_write_step;
+	snapshot->gatt_last_write_error =
+		scan_stats.gatt_last_write_error;
 #else
 	snapshot->scanning = false;
 	snapshot->peer = false;
@@ -306,6 +313,11 @@ void ble_time_sync_get_snapshot(struct ble_time_sync_snapshot *snapshot)
 	snapshot->gatt_write_attempts = 0;
 	snapshot->gatt_write_failures = 0;
 	snapshot->gatt_write_successes = 0;
+	snapshot->gatt_write_completions = 0;
+	snapshot->gatt_write_retries = 0;
+	snapshot->gatt_write_inflight = 0;
+	snapshot->gatt_write_step = 0;
+	snapshot->gatt_last_write_error = 0;
 #endif
 
 #if defined(CONFIG_TIME_SYNC_ROLE_SLAVE)

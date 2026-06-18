@@ -153,7 +153,10 @@ void status_log(const struct status_snapshot *snapshot)
 		snapshot->ble.connect_failures);
 
 	LOG_INF("ble_gatt: %s tx=%u ccc=%u sub=%u sub_fail=%u "
-		"notify_sub=%u rx=%u write=%u write_ok=%u write_fail=%u",
+		"notify_sub=%u rx=%u write=%u "
+		"write_ok=%u write_sent=%u write_fail=%u "
+		"write_retry=%u write_inflight=%u "
+		"write_step=%u write_last_err=%d",
 		snapshot->role,
 		snapshot->ble.gatt_tx_found,
 		snapshot->ble.gatt_tx_ccc_found,
@@ -163,5 +166,10 @@ void status_log(const struct status_snapshot *snapshot)
 		snapshot->ble.gatt_rx_found,
 		snapshot->ble.gatt_write_attempts,
 		snapshot->ble.gatt_write_successes,
-		snapshot->ble.gatt_write_failures);
+		snapshot->ble.gatt_write_completions,
+		snapshot->ble.gatt_write_failures,
+		snapshot->ble.gatt_write_retries,
+		snapshot->ble.gatt_write_inflight,
+		snapshot->ble.gatt_write_step,
+		snapshot->ble.gatt_last_write_error);
 }
