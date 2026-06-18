@@ -43,9 +43,36 @@ config TIME_SYNC_RADIO_TXEN_TO_ADDRESS_US
 	int "Master TXEN to RADIO ADDRESS reference delay in microseconds"
 	default 88
 
+config TIME_SYNC_MASTER_TX_TIMESLOT_LENGTH_US
+	int "Master RADIO TX timeslot length in microseconds"
+	default 3000
+	range 1000 25000
+	depends on TIME_SYNC_ROLE_MASTER
+
+config TIME_SYNC_MASTER_TX_START_OFFSET_US
+	int "Master RADIO TXEN offset from granted timeslot start"
+	default 500
+	range 200 20000
+	depends on TIME_SYNC_ROLE_MASTER
+
+config TIME_SYNC_BLE
+	bool "Enable Bluetooth control channel"
+	default y
+
+config TIME_SYNC_BLE_DEVICE_NAME_PREFIX
+	string "Bluetooth device name prefix"
+	default "TS"
+	depends on TIME_SYNC_BLE
+
+config TIME_SYNC_MASTER_BLE_AUTO_START
+	bool "Automatically start master BLE scanning after RADIO TX is stable"
+	default n
+	depends on TIME_SYNC_BLE && TIME_SYNC_ROLE_MASTER
+
 config TIME_SYNC_TIMESLOT_LENGTH_US
 	int "MPSL raw RADIO timeslot length in microseconds"
-	default 100000
+	default 25000 if TIME_SYNC_ROLE_MASTER
+	default 100000 if TIME_SYNC_ROLE_SLAVE
 	range 100 100000
 
 config TIME_SYNC_TIMESLOT_END_MARGIN_US
@@ -53,10 +80,55 @@ config TIME_SYNC_TIMESLOT_END_MARGIN_US
 	default 250
 	range 100 10000
 
+config TIME_SYNC_RX_START_OFFSET_US
+	int "Slave RXEN offset from granted timeslot start"
+	default 1000
+	range 200 20000
+
 config TIME_SYNC_TIMESLOT_REQUEST_TIMEOUT_US
 	int "Timeout for earliest MPSL timeslot requests"
 	default 200000
 	range 1000 256000000
+
+config TIME_SYNC_RX_ACQUIRE_WINDOW_US
+	int "Slave acquire RX window length in microseconds"
+	default 100000
+	range 1000 100000
+
+config TIME_SYNC_RX_ACQUIRE_PERIOD_US
+	int "Slave acquire RX gap in microseconds"
+	default 2000
+	range 1000 1000000
+
+config TIME_SYNC_RX_LOCKED_PRE_MARGIN_US
+	int "Slave locked RX pre-margin before predicted beacon"
+	default 1500
+	range 100 20000
+
+config TIME_SYNC_RX_LOCKED_POST_MARGIN_US
+	int "Slave locked RX post-margin after predicted beacon"
+	default 2500
+	range 100 20000
+
+config TIME_SYNC_RX_RECOVERY_PRE_MARGIN_US
+	int "Slave recovery RX pre-margin before predicted beacon"
+	default 10000
+	range 1000 50000
+
+config TIME_SYNC_RX_RECOVERY_POST_MARGIN_US
+	int "Slave recovery RX post-margin after predicted beacon"
+	default 10000
+	range 1000 50000
+
+config TIME_SYNC_RX_WINDOW_GUARD_US
+	int "Slave RX window guard time in microseconds"
+	default 300
+	range 0 5000
+
+config TIME_SYNC_RX_MISSED_TO_ACQUIRE
+	int "Missed locked windows before returning to acquire mode"
+	default 3
+	range 1 20
 
 config TIME_SYNC_STATUS_INTERVAL_MS
 	int "Status log interval in milliseconds"
