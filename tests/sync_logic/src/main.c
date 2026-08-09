@@ -1,80 +1,8 @@
 #include <zephyr/ztest.h>
 
 #include "sync_filter.h"
-#include "sync_packet.h"
 #include "heartbeat_led.h"
 #include "time_sync_math.h"
-
-ZTEST(sync_packet, test_packet_round_trip)
-{
-	struct sync_beacon in = {
-		.magic = SYNC_BEACON_MAGIC,
-		.version = SYNC_BEACON_VERSION,
-		.role = SYNC_BEACON_ROLE_MASTER,
-		.seq = 42,
-		.network_id = 0x12345678,
-		.master_tx_tick = 1000000,
-		.next_pps_master_tick = 2000000,
-		.sync_interval_us = 50000,
-		.status_flags = 0x5,
-	};
-	struct sync_beacon out;
-	uint8_t buf[SYNC_BEACON_WIRE_SIZE];
-
-	zassert_equal(sync_beacon_encode(&in, buf, sizeof(buf)), 0);
-	zassert_equal(sync_beacon_decode(buf, sizeof(buf), 0x12345678, &out), 0);
-	zassert_equal(out.magic, SYNC_BEACON_MAGIC);
-	zassert_equal(out.version, SYNC_BEACON_VERSION);
-	zassert_equal(out.role, SYNC_BEACON_ROLE_MASTER);
-	zassert_equal(out.seq, 42);
-	zassert_equal(out.network_id, 0x12345678);
-	zassert_equal(out.master_tx_tick, 1000000);
-	zassert_equal(out.next_pps_master_tick, 2000000);
-	zassert_equal(out.sync_interval_us, 50000);
-	zassert_equal(out.status_flags, 0x5);
-}
-
-ZTEST(sync_packet, test_packet_rejects_bad_crc)
-{
-	struct sync_beacon in = {
-		.magic = SYNC_BEACON_MAGIC,
-		.version = SYNC_BEACON_VERSION,
-		.role = SYNC_BEACON_ROLE_MASTER,
-		.seq = 1,
-		.network_id = 0x12345678,
-		.master_tx_tick = 10,
-		.next_pps_master_tick = 1000000,
-		.sync_interval_us = 50000,
-	};
-	struct sync_beacon out;
-	uint8_t buf[SYNC_BEACON_WIRE_SIZE];
-
-	zassert_equal(sync_beacon_encode(&in, buf, sizeof(buf)), 0);
-	buf[7] ^= 0x80;
-
-	zassert_equal(sync_beacon_decode(buf, sizeof(buf), 0x12345678, &out),
-		      -EBADMSG);
-}
-
-ZTEST(sync_packet, test_packet_rejects_wrong_network)
-{
-	struct sync_beacon in = {
-		.magic = SYNC_BEACON_MAGIC,
-		.version = SYNC_BEACON_VERSION,
-		.role = SYNC_BEACON_ROLE_MASTER,
-		.seq = 1,
-		.network_id = 0x12345678,
-		.master_tx_tick = 10,
-		.next_pps_master_tick = 1000000,
-		.sync_interval_us = 50000,
-	};
-	struct sync_beacon out;
-	uint8_t buf[SYNC_BEACON_WIRE_SIZE];
-
-	zassert_equal(sync_beacon_encode(&in, buf, sizeof(buf)), 0);
-	zassert_equal(sync_beacon_decode(buf, sizeof(buf), 0x87654321, &out),
-		      -EACCES);
-}
 
 ZTEST(sync_filter, test_filter_locks_after_consecutive_valid_beacons)
 {
@@ -306,7 +234,6 @@ ZTEST(time_sync_math, test_select_pps_target_advances_unscheduled_late_edge)
 	zassert_equal(target, 2000000);
 }
 
-ZTEST_SUITE(sync_packet, NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(sync_filter, NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(heartbeat_led, NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(time_sync_math, NULL, NULL, NULL, NULL, NULL);

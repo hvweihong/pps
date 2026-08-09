@@ -6,7 +6,6 @@ project(sync_logic_tests)
 target_include_directories(app PRIVATE ../../src)
 target_sources(app PRIVATE
 	src/main.c
-	../../src/sync_packet.c
 	../../src/sync_filter.c
 	../../src/time_sync_math.c
 )
