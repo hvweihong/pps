@@ -88,3 +88,96 @@
 - slave 上用于测试的 `status_interval_ms=2000` 覆盖值已通过
   `param clear status_interval_ms` 清除。
 - 最终两板均报告 `status_interval_ms = 1000 (default, runtime)`。
+
+## Stage 1 — reusable fixed-ID dual-board hardware gate
+
+执行日期：2026-08-09
+
+### Source and clean software baseline
+
+- 分支：`validation/incremental-board-e2e`；基线 HEAD：
+  `dd23544771c8405df7f84a1a9dc5d3e996aae402`。
+- `git merge-base --is-ancestor effe24c HEAD` 返回 0；已批准设计提交是基线祖先。
+- 开始 Stage 1 时 worktree clean。native 构建报告 Zephyr `4.3.99`、NCS build
+  `v3.3.4`、host-tools `0.17.4`、host GCC `15.2.0`；运行 banner 为 NCS
+  `v3.3.1-1d7a0b0e49b8`、Zephyr `v4.3.99-37e6c28576ee`。
+- bridge native suite：以下命令 PASS，93/93 cases，0 failed：
+
+  ```sh
+  /home/hv/ncs/.venv/bin/west build -p always -b native_sim/native \
+    tests/bridge_logic -d build/tests/bridge_logic
+  ./build/tests/bridge_logic/bridge_logic/zephyr/zephyr.exe
+  ```
+
+- sync native suite：以下命令 PASS，15/15 cases，0 failed：
+
+  ```sh
+  /home/hv/ncs/.venv/bin/west build -p always -b native_sim/native \
+    tests/sync_logic -d build/tests/sync_logic
+  ./build/tests/sync_logic/sync_logic/zephyr/zephyr.exe
+  ```
+
+- `for script in tests/*_static_check.sh; do bash "$script"; done`：13 PASS、
+  15 个 retired BLE/MPSL 检查按配置 SKIP、0 FAIL，共 28 个脚本。
+- Python gate/UF2 suite：
+
+  ```sh
+  /home/hv/ncs/.venv/bin/python -m unittest -v tests/test_board_e2e.py
+  /home/hv/ncs/.venv/bin/python -m unittest -v tests/test_flash_uf2.py
+  ```
+
+  最终分别为 12/12 和 9/9 tests PASS。timeout 单测证明只恢复一次、重试一次；
+  第二次 timeout 保留 receive tail 并抛错，不会无限循环。
+
+### Fresh validation firmware
+
+执行命令：
+
+```sh
+./build.sh master -d build/stage1-validation -- -DOVERLAY_CONFIG=validation.conf
+```
+
+- pristine build PASS；Zephyr `4.3.99`、NCS `v3.3.4`、Zephyr SDK/toolchain
+  `0.17.4`、ARM GCC `12.2.0`。
+- `CONFIG_RADIO_BRIDGE_VALIDATION_CDC=y`；FLASH `169440 B`，RAM `188340 B`；
+  UF2 `338944 B`。
+- UF2 SHA-256：`f50a5fa4ade1e7fc3de225b862386bbd5e2c6d4df993bef88d76091546cae395`。
+- 编译定义中的固件身份为 `APP_GIT_VERSION="dd23544771c8"`，没有 `-dirty`。
+  配置时 Stage 1 的 Python 文件尚为 untracked；现有 CMake dirty 检测使用
+  `git diff --quiet HEAD --`，因此它们不会改变固件 identity。固件 C 源和所有 tracked
+  build inputs 对该提交均 clean。
+
+### Fixed-ID hardware gate
+
+最终权威命令：
+
+```sh
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage1-baseline \
+  --master-id DBE5C3D84EA2EC6F \
+  --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage1-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage1-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 --command-timeout 10
+```
+
+原始时间戳 CDC/evidence logs：
+`build/board-e2e/20260809T041821.878308Z-stage1-baseline/`。
+
+- 固定映射：master `DBE5C3D84EA2EC6F`，slave `5B3D71D27A709CA2`；所有 discovery、
+  flash 和 CDC reconnect 均使用 `/dev/serial/by-id` 完整 ID，未按 `ttyACM` 编号选择。
+- 两板均在 flash attempt 1/2 成功，application 精确 ID 重新枚举；flash retry 计数均为 0。
+  最终 gate 没有 command timeout，automatic reflash recovery 计数均为 0；未使用
+  `uhubctl`，也未要求手动 reset、拔插或 bootloader 双击。
+- NVS role 检查：master `role_id=0`、slave `role_id=1`，均为 persisted 且已正确，
+  因此本轮无需改值或 cold reboot。shell readiness 后 `kernel uptime` 分别报告 master
+  `8347 ms`、slave `3844 ms`，随后两板 `bridge_test clear ok`。
+- 无线状态：master `active_count=1`；slave 同时在 status log 报告 `sync_state=2`，
+  `time_sync status` 报告 `LOCKED`。
+- master → slave：`bridge_test inject 600 49`，slave 精确返回
+  `bridge_test verify ok len=600 seed=49`。
+- slave → master：`bridge_test inject 600 114`，master 精确返回
+  `bridge_test verify ok len=600 seed=114`。
+- 两板 `bridge_test stats` 均为 `input_drop=0 output_drop=0`；最终 runtime status 均为
+  `uart_rx_drop_bytes=0`、`uart_tx_drop_bytes=0`、`queue_drop_bytes=0`。
+- 最终输出：`BOARD_E2E PASS stage=stage1-baseline cycles=1 length=600`；结果 **PASS**。
