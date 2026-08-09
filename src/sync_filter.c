@@ -183,6 +183,8 @@ int sync_filter_master_to_local(const struct sync_filter *filter,
 				uint64_t master_tick, uint64_t *local_tick)
 {
 	int64_t local;
+	int64_t master_delta;
+	int64_t denominator;
 
 	if (filter == NULL || local_tick == NULL) {
 		return -EINVAL;
@@ -193,7 +195,20 @@ int sync_filter_master_to_local(const struct sync_filter *filter,
 		return -EAGAIN;
 	}
 
-	local = (int64_t)master_tick - filter->offset_us;
+	if (filter->last_master_tick != 0u && filter->last_local_tick != 0u &&
+	    tick_delta_i64(master_tick, filter->last_master_tick,
+			   &master_delta) == 0) {
+		denominator = 1000000LL + filter->drift_ppm;
+		if (denominator <= 0 ||
+		    master_delta > INT64_MAX / 1000000LL ||
+		    master_delta < INT64_MIN / 1000000LL) {
+			return -ERANGE;
+		}
+		local = (int64_t)filter->last_local_tick +
+			(master_delta * 1000000LL) / denominator;
+	} else {
+		local = (int64_t)master_tick - filter->offset_us;
+	}
 	if (local < 0) {
 		return -ERANGE;
 	}

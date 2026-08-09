@@ -11,7 +11,9 @@
 
 #include "bridge_config.h"
 #include "link_scheduler_core.h"
+#include "nmea_parser.h"
 #include "param_config.h"
+#include "pps_input.h"
 #include "radio_address_crypto.h"
 #include "radio_transport.h"
 #include "pps_output.h"
@@ -20,6 +22,7 @@
 #include "timebase.h"
 #include "time_uart.h"
 #include "uart_bridge.h"
+#include "utc_clock.h"
 #include "wireless_time_sync.h"
 
 #if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
@@ -50,6 +53,8 @@ static struct rb_radio_addresses radio_addresses;
 static uint8_t group_key[RB_GROUP_KEY_BYTES];
 static uint32_t runtime_group_id;
 static uint32_t runtime_pps_period_us;
+static uint32_t runtime_time_source_mode;
+static uint32_t runtime_pps_input_delay_us;
 static uint64_t local_device_id;
 static bool initialized;
 static bool started;
@@ -59,10 +64,21 @@ static struct sync_filter sync_filter_runtime;
 static uint8_t local_discovery_slot;
 static uint32_t pending_sync_sequence;
 static bool pending_sync_capture;
+static struct rb_utc_clock utc_clock;
+static uint64_t pending_external_pps_tick;
+static int64_t pending_nmea_utc_seconds;
+static uint64_t last_external_pps_tick;
+static uint64_t last_nmea_tick;
+static uint64_t sync_filter_tick;
+static uint64_t next_expected_sync_tick;
+static bool pending_external_pps;
+static bool pending_nmea_utc;
 
 #if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
 static struct rb_validation_pipe validation_pipe;
 static struct k_spinlock validation_lock;
+static int64_t validation_pair_seconds;
+static uint8_t validation_time_command;
 #endif
 
 static uint64_t read_device_id(void)
@@ -121,6 +137,178 @@ static int runtime_make_event_view(const struct rb_radio_event *event,
 	}
 }
 
+static void runtime_note_utc_transition(enum rb_utc_state previous)
+{
+	enum rb_utc_state current = rb_utc_clock_state(&utc_clock);
+
+	if (previous != RB_UTC_HOLDOVER && current == RB_UTC_HOLDOVER) {
+		bridge_stats.holdover_count++;
+	}
+	bridge_stats.utc_state = (uint8_t)current;
+}
+
+static int runtime_phase_reset(void *context, uint64_t target_tick)
+{
+	uint64_t now_tick = timebase_now_us();
+
+	ARG_UNUSED(context);
+	if (now_tick > UINT64_MAX - 100u || target_tick < now_tick + 100u) {
+		return -ETIME;
+	}
+	return pps_output_reset_epoch(target_tick);
+}
+
+static void runtime_try_external_pair(void)
+{
+	enum rb_utc_state previous;
+	uint64_t now_tick;
+	int ret;
+
+	if (!pending_external_pps || !pending_nmea_utc) {
+		return;
+	}
+	now_tick = timebase_now_us();
+	if (now_tick < pending_external_pps_tick) {
+		now_tick = pending_external_pps_tick;
+	}
+	previous = rb_utc_clock_state(&utc_clock);
+	rb_utc_clock_tick(&utc_clock, now_tick);
+	ret = rb_utc_clock_note_pair(&utc_clock, pending_external_pps_tick,
+				     pending_nmea_utc_seconds);
+	if (ret != 0) {
+		bridge_stats.nmea_drop_count++;
+	}
+	pending_external_pps = false;
+	pending_nmea_utc = false;
+	runtime_note_utc_transition(previous);
+}
+
+static void runtime_consume_external_time(void)
+{
+	struct rb_nmea_utc utc;
+	char line[RB_NMEA_MAX_SENTENCE_LENGTH + 1u];
+	uint64_t capture_tick;
+	size_t line_len;
+
+	if (!scheduler.config.master || runtime_time_source_mode != 1u) {
+		return;
+	}
+	while (pps_input_poll(&capture_tick, K_NO_WAIT) == 0) {
+		bridge_stats.external_pps_count++;
+		last_external_pps_tick = timebase_now_us();
+		if (capture_tick < runtime_pps_input_delay_us) {
+			continue;
+		}
+		pending_external_pps_tick =
+			capture_tick - runtime_pps_input_delay_us;
+		pending_external_pps = true;
+	}
+	while ((line_len = time_uart_read_line(line, sizeof(line))) != 0u) {
+		if (rb_nmea_parse_sentence(line, line_len, &utc) != 0 ||
+		    rb_nmea_utc_to_unix(&utc, &pending_nmea_utc_seconds) != 0) {
+			bridge_stats.nmea_drop_count++;
+			continue;
+		}
+		bridge_stats.nmea_valid_count++;
+		last_nmea_tick = timebase_now_us();
+		pending_nmea_utc = true;
+	}
+	runtime_try_external_pair();
+}
+
+#if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
+static void runtime_consume_validation_time(void)
+{
+	int64_t pair_seconds;
+	uint8_t command;
+	k_spinlock_key_t key = k_spin_lock(&validation_lock);
+
+	command = validation_time_command;
+	pair_seconds = validation_pair_seconds;
+	validation_time_command = 0u;
+	k_spin_unlock(&validation_lock, key);
+	if (command == 1u) {
+		uint64_t pair_tick = utc_clock.have_pair ?
+			utc_clock.last_pair_tick + 1000000u : timebase_now_us();
+
+		bridge_stats.external_pps_count++;
+		bridge_stats.nmea_valid_count++;
+		last_external_pps_tick = pair_tick;
+		last_nmea_tick = pair_tick;
+		pending_external_pps_tick = pair_tick;
+		pending_nmea_utc_seconds = pair_seconds;
+		pending_external_pps = true;
+		pending_nmea_utc = true;
+		runtime_try_external_pair();
+	} else if (command == 2u) {
+		enum rb_utc_state previous = rb_utc_clock_state(&utc_clock);
+		uint64_t age_tick = utc_clock.have_pair ?
+			utc_clock.last_pair_tick + 3000000u :
+			timebase_now_us() + 3000000u;
+
+		last_external_pps_tick = age_tick - 3000000u;
+		last_nmea_tick = age_tick - 3000000u;
+		rb_utc_clock_tick(&utc_clock, age_tick);
+		runtime_note_utc_transition(previous);
+	}
+}
+#endif
+
+static void runtime_apply_wireless_utc(const struct rb_sync_discovery *frame)
+{
+	if (frame->time_quality == RB_TIME_HOLDOVER &&
+	    bridge_stats.utc_quality != RB_TIME_HOLDOVER) {
+		bridge_stats.holdover_count++;
+	}
+	bridge_stats.utc_quality = frame->time_quality;
+	bridge_stats.utc_seconds = frame->time_quality == RB_TIME_UTC_INVALID ?
+		0 : frame->next_pps_utc_seconds;
+}
+
+static void runtime_time_tick(uint64_t now_tick)
+{
+	uint64_t elapsed = sync_filter_tick == 0u || now_tick < sync_filter_tick ?
+		0u : now_tick - sync_filter_tick;
+	uint32_t missed = 0u;
+	struct rb_utc_publication publication;
+
+	if (!scheduler.config.master && next_expected_sync_tick != 0u &&
+	    now_tick >= next_expected_sync_tick) {
+		uint64_t interval = scheduler.config.sync_interval_us;
+		uint64_t count = (now_tick - next_expected_sync_tick) / interval + 1u;
+
+		missed = count > UINT32_MAX ? UINT32_MAX : (uint32_t)count;
+		next_expected_sync_tick += count * interval;
+		bridge_stats.sync_missed_count += count;
+	}
+	sync_filter_note_missed(&sync_filter_runtime, missed);
+	sync_filter_age(&sync_filter_runtime,
+		elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed);
+	sync_filter_tick = now_tick;
+	if (!scheduler.config.master) {
+		return;
+	}
+	{
+		enum rb_utc_state previous = rb_utc_clock_state(&utc_clock);
+		uint64_t publication_tick = now_tick < utc_clock.now_tick ?
+			utc_clock.now_tick : now_tick;
+
+		rb_utc_clock_tick(&utc_clock, publication_tick);
+		runtime_note_utc_transition(previous);
+		if (rb_utc_clock_publication(&utc_clock, publication_tick,
+					     &publication) != 0) {
+			publication = (struct rb_utc_publication){0};
+		}
+	}
+	if (rb_scheduler_set_time_publication(&scheduler,
+		publication.valid ? publication.next_pps_utc_seconds : 0,
+		(uint8_t)publication.quality) == 0) {
+		bridge_stats.utc_quality = (uint8_t)publication.quality;
+		bridge_stats.utc_seconds = publication.valid ?
+			publication.next_pps_utc_seconds : 0;
+	}
+}
+
 static void runtime_apply_sync(const struct rb_radio_event *event)
 {
 	struct rb_sync_discovery frame;
@@ -131,6 +319,13 @@ static void runtime_apply_sync(const struct rb_radio_event *event)
 	if (scheduler.config.master || event == NULL ||
 	    event->type != RB_RADIO_EVENT_RX_RECEIVED ||
 	    rb_sync_discovery_decode(event->data, event->length, &frame) != 0) {
+		return;
+	}
+	if (frame.group_id != runtime_group_id) {
+		return;
+	}
+	if (frame.common.master_session == 0u || frame.sync_sequence == 0u ||
+	    frame.sync_interval_us == 0u) {
 		return;
 	}
 	if (wireless_sync.session != frame.common.master_session) {
@@ -151,6 +346,11 @@ static void runtime_apply_sync(const struct rb_radio_event *event)
 	ret = wireless_time_sync_slave_receive(&wireless_sync, &frame,
 						 event->address_tick, &observation);
 	bridge_stats.sync_last_error = ret;
+	if ((ret == 0 || ret == -EAGAIN) &&
+	    wireless_sync.session == frame.common.master_session) {
+		runtime_apply_wireless_utc(&frame);
+		next_expected_sync_tick = event->address_tick + frame.sync_interval_us;
+	}
 	if (ret != 0) {
 		if (ret == -EAGAIN) {
 			bridge_stats.sync_tracker_wait_count++;
@@ -339,6 +539,9 @@ static int runtime_execute_action(struct rb_scheduler_action *action)
 			published.free_slots = scheduled.free_slots;
 			published.response_slot_count = scheduled.response_slot_count;
 			published.response_slot_us = scheduled.response_slot_us;
+			published.next_pps_utc_seconds =
+				scheduled.next_pps_utc_seconds;
+			published.time_quality = scheduled.time_quality;
 			if (rb_sync_discovery_encode(&published, action->wire,
 						     sizeof(action->wire),
 						     &action->wire_len) != 0) {
@@ -440,16 +643,21 @@ static void bridge_thread_fn(void *p1, void *p2, void *p3)
 			}
 		}
 		runtime_pull_uart_rx();
+		runtime_consume_external_time();
 	#if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
 		runtime_pull_validation_rx();
+		runtime_consume_validation_time();
 	#endif
 		for (;;) {
 			uint32_t evicted;
 			int action_ret;
 			int scheduler_ret;
 
+			uint64_t now_tick = timebase_now_us();
+
+			runtime_time_tick(now_tick);
 			scheduler_ret = rb_scheduler_next_action(&scheduler,
-							 timebase_now_us(), &action);
+							 now_tick, &action);
 			if (!scheduler_ret_recorded || scheduler_ret != last_scheduler_ret ||
 			    action.type != last_scheduler_action) {
 				radio_transport_retained_diag_note(
@@ -563,6 +771,18 @@ int bridge_runtime_init(void)
 		LOG_ERR("Failed to read time_uart_baudrate: %d", ret);
 		return ret;
 	}
+	ret = rb_param_get_uint32(RB_PARAM_TIME_SOURCE_MODE,
+				  &runtime_time_source_mode);
+	if (ret != 0) {
+		LOG_ERR("Failed to read time_source_mode: %d", ret);
+		return ret;
+	}
+	ret = rb_param_get_uint32(RB_PARAM_PPS_INPUT_DELAY_US,
+				  &runtime_pps_input_delay_us);
+	if (ret != 0) {
+		LOG_ERR("Failed to read pps_input_delay_us: %d", ret);
+		return ret;
+	}
 
 	/* Read group_key from param system */
 	size_t key_len = RB_GROUP_KEY_BYTES;
@@ -619,6 +839,9 @@ int bridge_runtime_init(void)
 		group_id);
 
 	rb_scheduler_init(&scheduler, &config);
+	memset(&bridge_stats, 0, sizeof(bridge_stats));
+	bridge_stats.is_master = config.master ? 1u : 0u;
+	bridge_stats.time_source_mode = (uint8_t)runtime_time_source_mode;
 	#if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
 	rb_validation_pipe_init(&validation_pipe);
 	#endif
@@ -629,6 +852,17 @@ int bridge_runtime_init(void)
 	}
 	wireless_time_sync_init(&wireless_sync, config.master_session,
 					sync_interval_us, 0);
+	{
+		struct rb_utc_clock_config utc_config = {
+			.external_mode = config.master && runtime_time_source_mode == 1u,
+			.loss_timeout_us = 3000000u,
+			.phase_reset = runtime_phase_reset,
+		};
+
+		rb_utc_clock_init(&utc_clock, &utc_config);
+		bridge_stats.utc_state = (uint8_t)rb_utc_clock_state(&utc_clock);
+		bridge_stats.utc_quality = RB_TIME_UTC_INVALID;
+	}
 	ret = uart_bridge_init();
 	if (ret != 0) {
 		return ret;
@@ -644,15 +878,20 @@ int bridge_runtime_init(void)
 		return ret;
 	}
 	radio_transport_set_wake_callback(bridge_thread_wake);
-	time_uart_set_wake_callback(bridge_thread_wake);
-	ret = time_uart_init(time_uart_baud);
-	if (ret != 0) {
-		return ret;
+	if (runtime_time_source_mode == 1u && config.master) {
+		ret = pps_input_init();
+		if (ret != 0) {
+			return ret;
+		}
+		time_uart_set_wake_callback(bridge_thread_wake);
+		ret = time_uart_init(time_uart_baud);
+		if (ret != 0) {
+			return ret;
+		}
 	}
 
 	current_profile = config.master ? RB_RADIO_MASTER_PTX :
 		RB_RADIO_SLAVE_GROUP_PRX;
-	memset(&bridge_stats, 0, sizeof(bridge_stats));
 	initialized = true;
 	return 0;
 }
@@ -725,6 +964,45 @@ void bridge_runtime_validation_stats_get(struct rb_validation_stats *stats)
 	rb_validation_stats_get(&validation_pipe, stats);
 	k_spin_unlock(&validation_lock, key);
 }
+
+int bridge_runtime_validation_time_pair(int64_t utc_seconds)
+{
+	k_spinlock_key_t key;
+
+	if (!initialized || !scheduler.config.master ||
+	    runtime_time_source_mode != 1u || utc_seconds < 0) {
+		return -EACCES;
+	}
+	key = k_spin_lock(&validation_lock);
+	if (validation_time_command != 0u) {
+		k_spin_unlock(&validation_lock, key);
+		return -EBUSY;
+	}
+	validation_pair_seconds = utc_seconds;
+	validation_time_command = 1u;
+	k_spin_unlock(&validation_lock, key);
+	bridge_thread_wake();
+	return 0;
+}
+
+int bridge_runtime_validation_time_source_lost(void)
+{
+	k_spinlock_key_t key;
+
+	if (!initialized || !scheduler.config.master ||
+	    runtime_time_source_mode != 1u) {
+		return -EACCES;
+	}
+	key = k_spin_lock(&validation_lock);
+	if (validation_time_command != 0u) {
+		k_spin_unlock(&validation_lock, key);
+		return -EBUSY;
+	}
+	validation_time_command = 2u;
+	k_spin_unlock(&validation_lock, key);
+	bridge_thread_wake();
+	return 0;
+}
 #endif
 
 void bridge_runtime_stats_get(struct rb_bridge_stats *stats)
@@ -739,6 +1017,7 @@ void bridge_runtime_stats_get(struct rb_bridge_stats *stats)
 	stats->duplicate_packets = rb_scheduler_duplicate_count(&scheduler);
 	stats->invalid_session_packets = rb_scheduler_invalid_session_count(&scheduler);
 	stats->sync_state = (uint8_t)sync_filter_state(&sync_filter_runtime);
+	stats->sync_age_us = sync_filter_runtime.age_us;
 	stats->slave_active = scheduler.slave_active ? 1u : 0u;
 	stats->slave_node_id = scheduler.slave_node_id;
 }

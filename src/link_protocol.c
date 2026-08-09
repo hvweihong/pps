@@ -23,6 +23,8 @@
 #define RB_SYNC_FREE_SLOTS_OFFSET (RB_SYNC_NONCE_OFFSET + 4u)
 #define RB_SYNC_RESPONSE_COUNT_OFFSET (RB_SYNC_FREE_SLOTS_OFFSET + 1u)
 #define RB_SYNC_RESPONSE_SLOT_US_OFFSET (RB_SYNC_RESPONSE_COUNT_OFFSET + 1u)
+#define RB_SYNC_NEXT_PPS_UTC_OFFSET (RB_SYNC_RESPONSE_SLOT_US_OFFSET + 2u)
+#define RB_SYNC_TIME_QUALITY_OFFSET (RB_SYNC_NEXT_PPS_UTC_OFFSET + 8u)
 
 #define RB_DATA_EPOCH_OFFSET RB_COMMON_HEADER_SIZE
 #define RB_DATA_SEQUENCE_OFFSET (RB_DATA_EPOCH_OFFSET + 2u)
@@ -59,9 +61,9 @@
 #define RB_SKIP_NEXT_SEQUENCE_OFFSET (RB_SKIP_EPOCH_OFFSET + 2u)
 #define RB_SKIP_DROP_COUNT_OFFSET (RB_SKIP_NEXT_SEQUENCE_OFFSET + 4u)
 
-_Static_assert(RB_SYNC_RESPONSE_SLOT_US_OFFSET + 2u ==
+_Static_assert(RB_SYNC_TIME_QUALITY_OFFSET + 1u ==
 		       RB_SYNC_DISCOVERY_WIRE_SIZE,
-		       "sync discovery wire layout must remain 56 bytes");
+		       "sync discovery wire layout must remain 65 bytes");
 _Static_assert(RB_DATA_SEQUENCE_OFFSET + 4u == RB_DATA_HEADER_SIZE,
 		       "data wire layout must remain 18 byte header");
 _Static_assert(RB_HELLO_CAPABILITIES_OFFSET + 4u == RB_HELLO_WIRE_SIZE,
@@ -95,6 +97,12 @@ static bool frame_type_valid(uint8_t type)
 static bool data_type_valid(uint8_t type)
 {
 	return type == RB_FRAME_DOWNLINK_DATA || type == RB_FRAME_REPAIR_DATA;
+}
+
+static bool time_quality_valid(uint8_t quality)
+{
+	return quality == RB_TIME_UTC_INVALID || quality == RB_TIME_LOCKED ||
+		quality == RB_TIME_HOLDOVER;
 }
 
 static int common_arguments_valid(const struct rb_common_header *header)
@@ -202,7 +210,8 @@ int rb_sync_discovery_encode(const struct rb_sync_discovery *frame,
 		return ret;
 	}
 	if (frame->common.type != RB_FRAME_SYNC_DISCOVERY ||
-	    frame->common.source_node != 0 || frame->common.lease_id != 0) {
+	    frame->common.source_node != 0 || frame->common.lease_id != 0 ||
+	    !time_quality_valid(frame->time_quality)) {
 		return -EINVAL;
 	}
 
@@ -221,6 +230,9 @@ int rb_sync_discovery_encode(const struct rb_sync_discovery *frame,
 	wire[RB_SYNC_FREE_SLOTS_OFFSET] = frame->free_slots;
 	wire[RB_SYNC_RESPONSE_COUNT_OFFSET] = frame->response_slot_count;
 	sys_put_le16(frame->response_slot_us, &wire[RB_SYNC_RESPONSE_SLOT_US_OFFSET]);
+	sys_put_le64((uint64_t)frame->next_pps_utc_seconds,
+		     &wire[RB_SYNC_NEXT_PPS_UTC_OFFSET]);
+	wire[RB_SYNC_TIME_QUALITY_OFFSET] = frame->time_quality;
 	if (wire_len != NULL) {
 		*wire_len = RB_SYNC_DISCOVERY_WIRE_SIZE;
 	}
@@ -245,7 +257,8 @@ int rb_sync_discovery_decode(const uint8_t *wire, size_t wire_len,
 		return ret;
 	}
 	if (common.type != RB_FRAME_SYNC_DISCOVERY || common.source_node != 0 ||
-	    common.lease_id != 0) {
+	    common.lease_id != 0 ||
+	    !time_quality_valid(wire[RB_SYNC_TIME_QUALITY_OFFSET])) {
 		return -EINVAL;
 	}
 
@@ -261,6 +274,9 @@ int rb_sync_discovery_decode(const uint8_t *wire, size_t wire_len,
 	frame->free_slots = wire[RB_SYNC_FREE_SLOTS_OFFSET];
 	frame->response_slot_count = wire[RB_SYNC_RESPONSE_COUNT_OFFSET];
 	frame->response_slot_us = sys_get_le16(&wire[RB_SYNC_RESPONSE_SLOT_US_OFFSET]);
+	frame->next_pps_utc_seconds =
+		(int64_t)sys_get_le64(&wire[RB_SYNC_NEXT_PPS_UTC_OFFSET]);
+	frame->time_quality = wire[RB_SYNC_TIME_QUALITY_OFFSET];
 
 	return 0;
 }

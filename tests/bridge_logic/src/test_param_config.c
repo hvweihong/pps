@@ -131,6 +131,24 @@ ZTEST(param_config, test_get_default_values)
 	ret = rb_param_get_uint32(RB_PARAM_AGGREGATION_TIMEOUT_US, &value);
 	zassert_equal(ret, 0, "Get should succeed");
 	zassert_equal(value, 2000, "Should return hardcoded default");
+
+	zassert_ok(rb_param_get_uint32(RB_PARAM_TIME_SOURCE_MODE, &value));
+	zassert_equal(value, 0, "Local time source is the reboot default");
+	zassert_ok(rb_param_get_uint32(RB_PARAM_PPS_INPUT_DELAY_US, &value));
+	zassert_equal(value, 0, "PPS input delay defaults to zero");
+}
+
+ZTEST(param_config, test_external_time_parameters_are_reboot_effective_and_bounded)
+{
+	rb_param_config_init();
+	zassert_true(rb_param_requires_reboot(RB_PARAM_TIME_SOURCE_MODE));
+	zassert_true(rb_param_requires_reboot(RB_PARAM_PPS_INPUT_DELAY_US));
+	zassert_equal(rb_param_set_uint32(RB_PARAM_TIME_SOURCE_MODE, 2), -EINVAL);
+	zassert_equal(rb_param_set_uint32(RB_PARAM_PPS_INPUT_DELAY_US, 1001), -EINVAL);
+	zassert_ok(rb_param_set_uint32(RB_PARAM_TIME_SOURCE_MODE, 1));
+	zassert_ok(rb_param_set_uint32(RB_PARAM_PPS_INPUT_DELAY_US, 1000));
+	zassert_ok(rb_param_clear(RB_PARAM_TIME_SOURCE_MODE));
+	zassert_ok(rb_param_clear(RB_PARAM_PPS_INPUT_DELAY_US));
 }
 
 ZTEST(param_config, test_set_and_get)

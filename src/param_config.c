@@ -268,6 +268,30 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		},
 		.nvs_id = 0x1011,
 	},
+	[RB_PARAM_TIME_SOURCE_MODE] = {
+		.name = "time_source_mode",
+		.description = "Time source: 0=local, 1=external",
+		.type = RB_PARAM_UINT8,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
+		.config.u8 = {
+			.min = 0,
+			.max = 1,
+			.default_value = 0,
+		},
+		.nvs_id = 0x1012,
+	},
+	[RB_PARAM_PPS_INPUT_DELAY_US] = {
+		.name = "pps_input_delay_us",
+		.description = "External PPS input delay compensation (us)",
+		.type = RB_PARAM_UINT16,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
+		.config.u16 = {
+			.min = 0,
+			.max = 1000,
+			.default_value = 0,
+		},
+		.nvs_id = 0x1013,
+	},
 };
 
 /* Get default value for a parameter */

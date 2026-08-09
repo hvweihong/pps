@@ -38,8 +38,14 @@ struct rb_bridge_stats {
 	uint64_t sync_last_tx_tick;
 	uint64_t sync_last_previous_master_tick;
 	uint64_t sync_relock_count;
+	uint64_t external_pps_count;
+	uint64_t nmea_valid_count;
+	uint64_t nmea_drop_count;
+	uint64_t holdover_count;
 	uint64_t action_error_count;
+	int64_t utc_seconds;
 	int64_t sync_offset;
+	uint32_t sync_age_us;
 	uint32_t sync_jitter;
 	uint32_t sync_last_sequence;
 	uint32_t sync_last_tx_sequence;
@@ -53,6 +59,10 @@ struct rb_bridge_stats {
 	uint8_t slave_node_id;
 	uint8_t last_action;
 	uint8_t last_action_error_action;
+	uint8_t is_master;
+	uint8_t time_source_mode;
+	uint8_t utc_state;
+	uint8_t utc_quality;
 };
 
 int bridge_runtime_init(void);
@@ -70,6 +80,8 @@ size_t bridge_runtime_validation_copy(size_t offset, uint8_t *data,
 				      size_t max_len);
 void bridge_runtime_validation_clear(void);
 void bridge_runtime_validation_stats_get(struct rb_validation_stats *stats);
+int bridge_runtime_validation_time_pair(int64_t utc_seconds);
+int bridge_runtime_validation_time_source_lost(void);
 #endif
 
 #endif /* BRIDGE_RUNTIME_H_ */

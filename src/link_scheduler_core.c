@@ -315,6 +315,9 @@ static int build_sync(struct rb_scheduler_core *core, uint64_t now_us,
 		.free_slots = core->free_slots,
 		.response_slot_count = core->config.response_slot_count,
 		.response_slot_us = core->config.response_slot_us,
+		.next_pps_utc_seconds =
+			core->time_publication.next_pps_utc_seconds,
+		.time_quality = core->time_publication.time_quality,
 	};
 
 	if (rb_sync_discovery_encode(&frame, action->wire, sizeof(action->wire),
@@ -743,6 +746,20 @@ void rb_scheduler_init(struct rb_scheduler_core *core,
 	rb_rx_window_init(&core->slave_rx_window, 1u, 1u,
 				  core->slave_rx_slots, RB_LINK_WINDOW_SIZE);
 	rb_slave_lease_init(&core->slave_lease, core->config.lease_timeout_us);
+}
+
+int rb_scheduler_set_time_publication(struct rb_scheduler_core *core,
+				      int64_t next_pps_utc_seconds,
+				      uint8_t time_quality)
+{
+	if (core == NULL ||
+	    (time_quality != RB_TIME_UTC_INVALID &&
+	     time_quality != RB_TIME_LOCKED && time_quality != RB_TIME_HOLDOVER)) {
+		return -EINVAL;
+	}
+	core->time_publication.next_pps_utc_seconds = next_pps_utc_seconds;
+	core->time_publication.time_quality = time_quality;
+	return 0;
 }
 
 int rb_scheduler_add_active_peer(struct rb_scheduler_core *core,

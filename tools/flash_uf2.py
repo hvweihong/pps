@@ -186,8 +186,12 @@ def touch_1200(serial_port: Path) -> None:
     if serial is None:
         raise FlashError("pyserial is required for 1200-baud bootloader touch")
     try:
-        with serial.Serial(str(serial_port.resolve()), baudrate=1200, timeout=0, write_timeout=0):
-            pass
+        for baudrate in (115200, 1200):
+            with serial.Serial(
+                str(serial_port.resolve()), baudrate=baudrate,
+                timeout=0, write_timeout=0
+            ):
+                pass
     except Exception as exc:  # pyserial has platform-specific exception classes
         # The application resets as soon as the CDC line coding is delivered.
         # Linux can report the expected unplug during context-manager close as

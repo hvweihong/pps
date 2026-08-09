@@ -7,6 +7,7 @@
 #include "link_scheduler_core.h"
 
 static struct rb_scheduler_core core;
+static void complete_master_tx(uint64_t now_us);
 
 static void init_master(void)
 {
@@ -23,6 +24,28 @@ static void init_master(void)
 		.response_slot_us = 500,
 	};
 	rb_scheduler_init(&core, &config);
+}
+
+ZTEST(master_scheduler, test_sync_publication_is_injected_into_each_frame)
+{
+	struct rb_scheduler_action action;
+	struct rb_sync_discovery frame;
+
+	init_master();
+	rb_scheduler_set_sync_deadline(&core, 100000u);
+	zassert_ok(rb_scheduler_next_action(&core, 100000u, &action));
+	zassert_ok(rb_sync_discovery_decode(action.wire, action.wire_len, &frame));
+	zassert_equal(frame.next_pps_utc_seconds, 0);
+	zassert_equal(frame.time_quality, RB_TIME_UTC_INVALID);
+
+	zassert_ok(rb_scheduler_set_time_publication(&core, 1700000000,
+							 RB_TIME_LOCKED));
+	complete_master_tx(100000u);
+	rb_scheduler_set_sync_deadline(&core, 200000u);
+	zassert_ok(rb_scheduler_next_action(&core, 200000u, &action));
+	zassert_ok(rb_sync_discovery_decode(action.wire, action.wire_len, &frame));
+	zassert_equal(frame.next_pps_utc_seconds, 1700000000);
+	zassert_equal(frame.time_quality, RB_TIME_LOCKED);
 }
 
 static void complete_master_tx(uint64_t now_us)

@@ -20,6 +20,20 @@ static int parse_uint(const char *text, unsigned long maximum,
 	return 0;
 }
 
+static int parse_utc_seconds(const char *text, int64_t *value)
+{
+	char *end;
+	long long parsed;
+
+	errno = 0;
+	parsed = strtoll(text, &end, 10);
+	if (errno != 0 || end == text || *end != '\0' || parsed < 0) {
+		return -EINVAL;
+	}
+	*value = (int64_t)parsed;
+	return 0;
+}
+
 static int cmd_bridge_test_inject(const struct shell *shell, size_t argc,
 				  char **argv)
 {
@@ -173,3 +187,50 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_bridge_test,
 
 SHELL_CMD_REGISTER(bridge_test, &sub_bridge_test,
 		   "Validation-only bridge payload commands", NULL);
+
+static int cmd_time_test_pair(const struct shell *shell, size_t argc,
+			      char **argv)
+{
+	int64_t utc_seconds;
+	int ret;
+
+	if (argc != 2u || parse_utc_seconds(argv[1], &utc_seconds) != 0) {
+		shell_error(shell, "usage: time_test pair <utc_seconds>");
+		return -EINVAL;
+	}
+	ret = bridge_runtime_validation_time_pair(utc_seconds);
+	if (ret != 0) {
+		shell_error(shell, "time_test pair failed err=%d", ret);
+		return ret;
+	}
+	shell_print(shell, "time_test pair queued utc_seconds=%lld",
+		    (long long)utc_seconds);
+	return 0;
+}
+
+static int cmd_time_test_source_lost(const struct shell *shell, size_t argc,
+				     char **argv)
+{
+	int ret;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	ret = bridge_runtime_validation_time_source_lost();
+	if (ret != 0) {
+		shell_error(shell, "time_test source_lost failed err=%d", ret);
+		return ret;
+	}
+	shell_print(shell, "time_test source_lost queued");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_time_test,
+	SHELL_CMD_ARG(pair, NULL, "Synthesize PPS/NMEA pair: <utc_seconds>",
+		      cmd_time_test_pair, 2, 0),
+	SHELL_CMD(source_lost, NULL, "Age external PPS/NMEA inputs by 3 seconds",
+		  cmd_time_test_source_lost),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(time_test, &sub_time_test,
+		   "Validation-only external time-source commands", NULL);

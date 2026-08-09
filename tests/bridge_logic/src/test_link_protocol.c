@@ -46,6 +46,8 @@ ZTEST(link_protocol, test_sync_discovery_round_trip)
 		.free_slots = 2,
 		.response_slot_count = 8,
 		.response_slot_us = 500,
+		.next_pps_utc_seconds = 1700000000,
+		.time_quality = RB_TIME_LOCKED,
 	};
 	struct rb_sync_discovery out;
 	uint8_t wire[RB_ESB_MAX_PAYLOAD];
@@ -64,6 +66,45 @@ ZTEST(link_protocol, test_sync_discovery_round_trip)
 	zassert_equal(out.free_slots, 2);
 	zassert_equal(out.response_slot_count, 8);
 	zassert_equal(out.response_slot_us, 500);
+	zassert_equal(out.next_pps_utc_seconds, 1700000000);
+	zassert_equal(out.time_quality, RB_TIME_LOCKED);
+	/* The signed UTC value is carried as a little-endian two's-complement
+	 * 64-bit integer immediately after the legacy 56-byte payload. */
+	zassert_equal(wire[56], 0x00);
+	zassert_equal(wire[57], 0xf1);
+	zassert_equal(wire[58], 0x53);
+	zassert_equal(wire[59], 0x65);
+	zassert_equal(wire[60], 0x00);
+	zassert_equal(wire[61], 0x00);
+	zassert_equal(wire[62], 0x00);
+	zassert_equal(wire[63], 0x00);
+	zassert_equal(wire[64], RB_TIME_LOCKED);
+}
+
+ZTEST(link_protocol, test_sync_discovery_rejects_invalid_quality_and_v1)
+{
+	struct rb_sync_discovery frame = {
+		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 1, 0, 0),
+		.group_id = 1,
+		.master_id = 1,
+		.sync_sequence = 1,
+		.next_pps_master_tick = 2,
+		.next_pps_utc_seconds = -1,
+		.time_quality = RB_TIME_LOCKED,
+	};
+	struct rb_sync_discovery out;
+	uint8_t wire[RB_ESB_MAX_PAYLOAD];
+	size_t len;
+
+	zassert_ok(rb_sync_discovery_encode(&frame, wire, sizeof(wire), &len));
+	zassert_equal(rb_sync_discovery_decode(wire, len, &out), 0);
+	zassert_equal(out.next_pps_utc_seconds, -1);
+	zassert_equal(wire[56], 0xff);
+	zassert_equal(wire[63], 0xff);
+	wire[64] = 0xff;
+	zassert_equal(rb_sync_discovery_decode(wire, len, &out), -EINVAL);
+	wire[2] = 1;
+	zassert_equal(rb_sync_discovery_decode(wire, len, &out), -EBADMSG);
 }
 
 ZTEST(link_protocol, test_downlink_keeps_opaque_bytes)

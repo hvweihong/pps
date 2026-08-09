@@ -7,9 +7,9 @@
 #define RB_ESB_MAX_PAYLOAD 252u
 #define RB_PROTOCOL_MAGIC_0 ((uint8_t)'R')
 #define RB_PROTOCOL_MAGIC_1 ((uint8_t)'B')
-#define RB_PROTOCOL_VERSION 1u
+#define RB_PROTOCOL_VERSION 2u
 #define RB_COMMON_HEADER_SIZE 12u
-#define RB_SYNC_DISCOVERY_WIRE_SIZE 56u
+#define RB_SYNC_DISCOVERY_WIRE_SIZE 65u
 #define RB_DATA_HEADER_SIZE 18u
 #define RB_HELLO_WIRE_SIZE 28u
 #define RB_ASSIGN_WIRE_SIZE 34u
@@ -51,6 +51,12 @@ enum rb_frame_type {
 	RB_FRAME_SKIP_TO = 8,
 };
 
+enum rb_time_quality {
+	RB_TIME_UTC_INVALID = 0,
+	RB_TIME_LOCKED = 1,
+	RB_TIME_HOLDOVER = 2,
+};
+
 struct rb_common_header {
 	uint8_t type;
 	uint32_t master_session;
@@ -76,6 +82,8 @@ struct rb_sync_discovery {
 	uint8_t free_slots;
 	uint8_t response_slot_count;
 	uint16_t response_slot_us;
+	int64_t next_pps_utc_seconds;
+	uint8_t time_quality;
 };
 
 struct rb_data_frame {

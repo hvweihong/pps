@@ -64,6 +64,11 @@ struct rb_scheduler_config {
 	uint16_t response_slot_us;
 };
 
+struct rb_scheduler_time_publication {
+	int64_t next_pps_utc_seconds;
+	uint8_t time_quality;
+};
+
 #define RB_SCHEDULER_MAX_PEERS RB_MEMBERSHIP_MAX_PEERS
 #define RB_SCHEDULER_UART_QUEUE_SIZE 16384u
 #define RB_SCHEDULER_DEFAULT_DOWNLINK_EPOCH 1u
@@ -164,6 +169,7 @@ struct rb_scheduler_core {
 	uint64_t queue_drop_bytes;
 	uint64_t duplicate_rx_count;
 	uint64_t invalid_session_rx_count;
+	struct rb_scheduler_time_publication time_publication;
 };
 
 void rb_scheduler_init(struct rb_scheduler_core *core,
@@ -199,6 +205,9 @@ void rb_scheduler_set_free_slots(struct rb_scheduler_core *core,
 				 uint8_t free_slots);
 void rb_scheduler_set_discovery_slot(struct rb_scheduler_core *core,
 					 uint8_t slot);
+int rb_scheduler_set_time_publication(struct rb_scheduler_core *core,
+				      int64_t next_pps_utc_seconds,
+				      uint8_t time_quality);
 uint32_t rb_scheduler_peer_poll_interval(const struct rb_scheduler_core *core,
 						 uint8_t node_id);
 uint8_t rb_scheduler_active_count(const struct rb_scheduler_core *core);

@@ -7,8 +7,41 @@
 #include "pps_input.h"
 #include "time_uart.h"
 #include "uart_bridge.h"
+#include "utc_clock.h"
 
 LOG_MODULE_REGISTER(star_bridge_status, LOG_LEVEL_INF);
+
+static const char *utc_quality_name(uint8_t quality)
+{
+	switch (quality) {
+	case RB_TIME_LOCKED:
+		return "LOCKED";
+	case RB_TIME_HOLDOVER:
+		return "HOLDOVER";
+	default:
+		return "UTC_INVALID";
+	}
+}
+
+static const char *time_source_name(const struct rb_bridge_stats *bridge)
+{
+	if (!bridge->is_master) {
+		return "WIRELESS";
+	}
+	if (bridge->time_source_mode == 0u) {
+		return "LOCAL";
+	}
+	switch (bridge->utc_state) {
+	case RB_UTC_LOCKED:
+		return "EXTERNAL_LOCKED";
+	case RB_UTC_HOLDOVER:
+		return "EXTERNAL_HOLDOVER";
+	case RB_UTC_INVALID:
+		return "EXTERNAL_INVALID";
+	default:
+		return "EXTERNAL_ACQUIRING";
+	}
+}
 
 void status_log_bridge(void)
 {
@@ -18,6 +51,16 @@ void status_log_bridge(void)
 	const struct rb_time_uart_stats *time_uart = time_uart_stats_get();
 
 	bridge_runtime_stats_get(&bridge);
+	LOG_INF("bridge_time time_source=%s utc_quality=%s utc_seconds=%lld "
+		"external_pps_count=%llu nmea_valid_count=%llu "
+		"nmea_drop_count=%llu holdover_count=%llu sync_age_us=%u",
+		time_source_name(&bridge), utc_quality_name(bridge.utc_quality),
+		(long long)bridge.utc_seconds,
+		(unsigned long long)bridge.external_pps_count,
+		(unsigned long long)bridge.nmea_valid_count,
+		(unsigned long long)bridge.nmea_drop_count,
+		(unsigned long long)bridge.holdover_count,
+		bridge.sync_age_us);
 	LOG_INF("bridge_status uart_rx_bytes=%llu uart_tx_bytes=%llu "
 		"uart_rx_drop_bytes=%llu uart_tx_drop_bytes=%llu "
 		"uart_rx_restart_errors=%u",

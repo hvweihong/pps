@@ -4,9 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "link_protocol.h"
+
 enum rb_utc_state { RB_UTC_LOCAL, RB_UTC_ACQUIRING, RB_UTC_LOCKED,
 	RB_UTC_HOLDOVER, RB_UTC_INVALID };
-enum rb_time_quality { RB_TIME_UTC_INVALID, RB_TIME_LOCKED, RB_TIME_HOLDOVER };
 
 typedef int (*rb_utc_phase_reset_fn)(void *context, uint64_t target_tick);
 

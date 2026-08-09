@@ -165,6 +165,26 @@ class FlashCopyTests(unittest.TestCase):
 
 
 class FlashTouchTests(unittest.TestCase):
+    def test_1200_touch_normalizes_line_coding_before_reboot(self):
+        opened_baudrates = []
+
+        class RecordingSerial:
+            def __init__(self, *args, **kwargs):
+                opened_baudrates.append(kwargs["baudrate"])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with mock.patch.object(
+            flash_uf2, "serial", mock.Mock(Serial=RecordingSerial)
+        ):
+            flash_uf2.touch_1200(Path("/dev/ttyACM0"))
+
+        self.assertEqual(opened_baudrates, [115200, 1200])
+
     def test_1200_touch_accepts_disconnect_during_reboot(self):
         class RebootingSerial:
             def __init__(self, *args, **kwargs):

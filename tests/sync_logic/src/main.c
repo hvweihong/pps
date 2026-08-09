@@ -208,6 +208,29 @@ ZTEST(sync_filter, test_filter_converts_master_pps_to_local_tick)
 	zassert_equal(local_pps, 1000500);
 }
 
+ZTEST(sync_filter, test_filter_master_to_local_predicts_drift_at_next_pps)
+{
+	struct sync_filter filter;
+	struct sync_filter_config cfg = sync_filter_default_config();
+	struct sync_observation obs = {
+		.master_tick = 1000000,
+		.local_tick = 1000000,
+		.next_pps_master_tick = 2000000,
+	};
+	uint64_t local_pps;
+
+	cfg.lock_beacons = 1;
+	sync_filter_init(&filter, &cfg);
+	zassert_ok(sync_filter_update(&filter, &obs));
+	/* Master advances 100 us more than local over a 1 s interval. */
+	obs.master_tick = 2000100;
+	obs.local_tick = 2000000;
+	obs.next_pps_master_tick = 3000100;
+	zassert_ok(sync_filter_update(&filter, &obs));
+	zassert_ok(sync_filter_master_to_local(&filter, 3000100, &local_pps));
+	zassert_equal(local_pps, 2999900);
+}
+
 ZTEST(sync_filter, test_filter_reset_preserves_config_and_clears_lock)
 {
 	struct sync_filter filter;

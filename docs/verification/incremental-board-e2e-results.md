@@ -525,3 +525,71 @@ No external PPS source, GNSS NMEA source, oscilloscope, or logic analyzer was wi
 stage. The result validates firmware integration, CDC transport, reboot safety, and the enumerated
 software input drop/error counters; it makes no claim that physical PPS capture, NMEA
 reception/association, or electrical timing accuracy has been measured.
+
+## Stage 4 — UTC publication and time-source states
+
+执行日期：2026-08-09。基线为 Stage 3 提交 `52695d8`。本阶段将无线同步协议升级为
+v2/65-byte sync frame，传播 `next_pps_utc_seconds` 与 `time_quality`，并接入 master 的
+`LOCAL`、`EXTERNAL_ACQUIRING`、`EXTERNAL_LOCKED`、`EXTERNAL_HOLDOVER` 状态。新增
+`time_source_mode`（0 local、1 external）与 `pps_input_delay_us` 持久参数；validation firmware
+提供 `time_test pair` 和 `time_test source_lost`，只在 bridge thread 上模拟配对/老化。
+
+### Host/build evidence
+
+- bridge native suite：**118/118 PASS**；sync native suite：**16/16 PASS**。
+- Python board/flash suite：**46/46 PASS**；11 个 active static checks PASS，15 个 retired
+  BLE/MPSL checks SKIP；`ruff` 与 `git diff --check` PASS。
+- `tests/time_source_integration_static_check.sh` PASS，覆盖 group-first reject、UTC publication、
+  filter age/drift，以及 PPS/NMEA 仅在 external master 初始化。
+- flash helper 回归：**14/14 PASS**。实板发现 CDC line coding 已为 1200 时，重复 1200-touch
+  不触发 bootloader；工具现先写 115200 再写 1200，后续两板均首刷成功。
+- validation build：FLASH `178192 B`、RAM `190836 B`、UF2 `356864 B`，SHA-256
+  `f5a7567c013ed1ebe757adab49354fe23872424d934ecd5135bc2aa453da2d10`。
+
+### Hardware findings retained
+
+- `build/board-e2e/20260809T081818.916393Z-stage4-precondition-rerun/` 在 slave 的 UF2 枚举
+  上失败；内核日志证明 1200-touch 后没有 USB disconnect。显式 115200→1200 后同一固定 ID
+  单次 flash 成功，由上述 TDD 回归固化。
+- `build/board-e2e/20260809T083013.907150Z-stage4-time-state-resilient-gate/` 在
+  `EXTERNAL_HOLDOVER` 和双向 600-byte traffic 均通过后，正确拒绝 slave 的
+  `pps_input_drop_count=75`。根因是未接线 P0.02 浮空且 PPS input 被所有角色初始化；现改为只在
+  external master 初始化 PPS input 与 NMEA UART。
+
+修复后先执行标准 fixed-ID gate：
+
+```sh
+/usr/bin/timeout 300s /home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage4-external-input-role-gated \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage4-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage4-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 --command-timeout 10
+```
+
+- **`BOARD_E2E PASS`** after 16.6 s；两板 flash attempt 1/2 成功，零 retry/recovery；无线
+  `active_count=1`/`LOCKED`，双向 600-byte exact verify，所有 UART/PPS/queue drops 为 0。
+- Raw evidence：
+  `build/board-e2e/20260809T083323.619638Z-stage4-external-input-role-gated/master.raw.log`、
+  `build/board-e2e/20260809T083323.619638Z-stage4-external-input-role-gated/slave.raw.log`。
+
+随后在同一 fresh firmware 上运行 Stage 4 专用 CDC 状态门禁：master 持久化
+`time_source_mode=1` 并 cold reboot，验证 `EXTERNAL_ACQUIRING/UTC_INVALID`；连续提交
+`1700000200..1700000202` 三个 synthetic pairs 后，两板分别达到
+`EXTERNAL_LOCKED/LOCKED` 与 `WIRELESS/LOCKED`；`time_test source_lost` 后两板均传播
+`HOLDOVER`。HOLDOVER 下双向 600-byte exact verify PASS。最后恢复
+`time_source_mode=0` 并 cold reboot，两板恢复 `LOCAL/UTC_INVALID` 与
+`WIRELESS/UTC_INVALID`，再次完成双向 600-byte exact verify，全部输入/queue drops 为 0。
+
+- Result：**`STAGE4_TIME_GATE PASS`** after 22.8 s。
+- Authoritative raw evidence：
+  `build/board-e2e/20260809T083433.640824Z-stage4-time-state-final-short/master.raw.log`、
+  `build/board-e2e/20260809T083433.640824Z-stage4-time-state-final-short/slave.raw.log`。
+- Gate cleanup 再次读取 NVS，确认 master 的 `time_source_mode=0`，未把 external test mode
+  留给后续阶段。
+
+### Verification boundary
+
+本阶段的 external state transition 使用 CDC synthetic pair，验证的是板上 thread-context
+NMEA/PPS association、UTC 状态机与无线传播，不代表物理 P0.02/P0.05 电气输入已测量。仍无外部
+GNSS/PPS 源或示波器，因此不声明真实输入捕获或 `<=20 us` 相位精度。
