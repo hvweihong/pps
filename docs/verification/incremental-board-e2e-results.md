@@ -593,3 +593,59 @@ v2/65-byte sync frame，传播 `next_pps_utc_seconds` 与 `time_quality`，并�
 本阶段的 external state transition 使用 CDC synthetic pair，验证的是板上 thread-context
 NMEA/PPS association、UTC 状态机与无线传播，不代表物理 P0.02/P0.05 电气输入已测量。仍无外部
 GNSS/PPS 源或示波器，因此不声明真实输入捕获或 `<=20 us` 相位精度。
+
+## Stage 5 — Best-effort broadcast downlink
+
+执行日期：2026-08-09。基线为 Stage 4 提交 `d054fb6`。本阶段将 master 业务下行改为
+`no_ack` 广播，删除 ACK_UPLINK 中的下行 epoch/base/bitmap、master 下行 history、repair 与
+skip action；ASSIGN、POLL 和 slave→master 可靠轮询上行保持不变。slave 对新 sequence 立即
+交付完整 payload，缺号只累计 `downlink_gap`，重复/旧帧只累计 `downlink_duplicate`，不等待补包。
+
+### Host/build evidence
+
+- TDD RED：新增 gap/duplicate 测试首先因 scheduler 尚无对应 sequence-gate 计数而编译失败。
+- bridge native suite：**121/121 PASS**；sync native suite：**16/16 PASS**。
+- Python board/flash suite：**48/48 PASS**；全部 active static checks、`ruff` 与
+  `git diff --check` PASS。
+- `tests/radio_transport_static_check.sh` fail-closed 检查 ACK header 为 22 bytes、生产路径不存在
+  repair/skip/history/downlink ACK bitmap、业务广播显式使用 `no_ack=true`，并要求 validation
+  丢包发送生成 synthetic TX-success，避免 scheduler 永久停在 in-flight。
+- validation + loss build：FLASH `177140 B`、RAM `159028 B`、UF2 `354304 B`，SHA-256
+  `2a3456d10cc36f2d04996efcb85621d1f250f8f56d4871c62b5aba6cd6f52cf9`。
+
+丢包注入只在 `loss-validation.conf` 启用。`bridge_test loss <frame_type> <every_n>` 仅对匹配
+frame type 计数；主动丢弃 TX 时向 runtime 排入 synthetic TX-success，因此 validation 不会因
+故意丢包卡住 transaction gate。`bridge_test loss_off` 将 mask/rate 清零。
+
+### Dual-board hardware gate
+
+执行命令：
+
+```sh
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage5-best-effort-loss-short \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage5-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage5-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 --downlink-loss-every-n 3 \
+  --command-timeout 10
+```
+
+- **`BOARD_E2E PASS`** after 34.7 s；两板 exact-ID flash attempt 1/2 成功，零 flash retry、
+  零 command recovery。
+- injection off 时 master→slave 与 slave→master 各 600-byte exact verify PASS，无 UART、
+  validation、time-UART 或 scheduler queue drop。
+- master 对 `RB_FRAME_DOWNLINK_DATA`（type 4）每 3 帧丢 1 帧；连续两个不同 600-byte pattern
+  后 slave `downlink_gap` 从 0 增至 2，调度器保持响应。
+- loss active 期间 slave→master 600-byte exact verify PASS，证明可靠轮询上行未受业务下行
+  丢包影响。
+- `loss_off` 后清理 validation payload 队列，下一组 master→slave 600-byte pattern 立即 exact
+  verify PASS；最终两板所有 input/output/runtime drops 仍为 0。
+- Authoritative raw evidence：
+  `build/board-e2e/20260809T091052.235923Z-stage5-best-effort-loss-short/master.raw.log`、
+  `build/board-e2e/20260809T091052.235923Z-stage5-best-effort-loss-short/slave.raw.log`。
+
+### Verification boundary
+
+本阶段实板证明单 slave 下 best-effort 下行的丢包前进、可靠上行独立性与关闭注入后的恢复。
+多 slave 的上行 record 隔离属于 Stage 6；外部 PPS/GNSS 与 `<=20 us` 相位测量边界保持不变。

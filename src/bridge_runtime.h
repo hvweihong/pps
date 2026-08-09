@@ -16,11 +16,10 @@ struct rb_bridge_stats {
 	uint64_t radio_retry_exhausted;
 	uint64_t broadcast_packets;
 	uint64_t poll_packets;
-	uint64_t repair_packets;
 	uint64_t duplicate_packets;
+	uint64_t downlink_gap_packets;
+	uint64_t downlink_duplicate_packets;
 	uint64_t invalid_session_packets;
-	uint64_t radio_history_drop_packets;
-	uint64_t unrecoverable_gap_count;
 	uint64_t queue_drop_bytes;
 	uint64_t discovery_hello_count;
 	uint64_t sync_rx_count;

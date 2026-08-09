@@ -222,9 +222,6 @@ static void slave_prepare_ack(struct rb_scheduler_core *core,
 					 core->slave_lease_id, core->slave_node_id),
 		.uplink_epoch = (uint16_t)core->slave_uplink_epoch,
 		.uplink_sequence = payload_sequence,
-		.downlink_epoch = (uint16_t)core->slave_downlink_epoch,
-		.downlink_ack_base = core->slave_rx_window.ack_base,
-		.downlink_ack_bitmap = core->slave_rx_window.ack_bitmap,
 		.drop_count = 0,
 		.payload = payload_len ? payload : NULL,
 		.payload_len = payload_len,
@@ -249,8 +246,6 @@ static bool action_uses_transaction_gate(enum rb_scheduler_action_type type)
 	case RB_ACTION_SEND_SYNC_DISCOVERY:
 	case RB_ACTION_SEND_ASSIGN:
 	case RB_ACTION_SEND_DOWNLINK_BROADCAST:
-	case RB_ACTION_SEND_REPAIR:
-	case RB_ACTION_SEND_SKIP_TO:
 	case RB_ACTION_SEND_POLL:
 	case RB_ACTION_SEND_HELLO:
 		return true;
@@ -352,9 +347,6 @@ static int build_broadcast(struct rb_scheduler_core *core, uint64_t now_us,
 	uint8_t payload[RB_PACKET_DATA_MAX];
 	size_t payload_len;
 	uint32_t sequence = core->next_downlink_sequence;
-	const uint8_t *history_payload = payload;
-	size_t history_payload_len = 0u;
-	bool sequence_already_stored;
 
 	payload_len = uart_peek(core, payload, sizeof(payload));
 	if (payload_len == 0u && !core->queued_broadcast) {
@@ -369,8 +361,6 @@ static int build_broadcast(struct rb_scheduler_core *core, uint64_t now_us,
 				return -EBADMSG;
 			}
 			sequence = queued.sequence;
-			history_payload = queued.payload;
-			history_payload_len = queued.payload_len;
 		}
 		core->queued_broadcast = false;
 	} else {
@@ -390,14 +380,6 @@ static int build_broadcast(struct rb_scheduler_core *core, uint64_t now_us,
 			return -EINVAL;
 		}
 		uart_discard(core, payload_len);
-		history_payload_len = payload_len;
-	}
-	sequence_already_stored = rb_tx_window_contains(&core->downlink_history,
-						       sequence);
-	if (!sequence_already_stored &&
-	    rb_tx_window_store(&core->downlink_history, sequence, history_payload,
-				 history_payload_len) != 0) {
-		return -EINVAL;
 	}
 	if (sequence == core->next_downlink_sequence) {
 		core->next_downlink_sequence++;
@@ -412,60 +394,6 @@ static int build_broadcast(struct rb_scheduler_core *core, uint64_t now_us,
 	core->transaction_in_flight = true;
 	core->in_flight_node = 0u;
 	core->in_flight_pipe = 0u;
-	core->in_flight_type = action->type;
-	return 0;
-}
-
-static int build_repair_or_skip(struct rb_scheduler_core *core, uint8_t node_id,
-					uint64_t now_us,
-					struct rb_scheduler_action *action)
-{
-	struct rb_scheduler_peer_runtime *runtime = peer_runtime(core, node_id);
-	const struct rb_packet_slot *slot;
-
-	if (runtime == NULL || !peer_schedulable(core, node_id)) {
-		return -ENOENT;
-	}
-	if (runtime->skip_pending) {
-		struct rb_skip_to frame = {
-			.common = RB_COMMON_INIT(RB_FRAME_SKIP_TO,
-						 core->config.master_session,
-						 rb_membership_peer(&core->membership, node_id)->lease_id,
-						 0),
-			.direction = 0,
-			.stream_epoch = (uint16_t)core->downlink_epoch,
-			.next_sequence = runtime->missing_sequence,
-			.drop_count = 1,
-		};
-		if (rb_skip_to_encode(&frame, action->wire, sizeof(action->wire),
-					      &action->wire_len) != 0) {
-			return -EINVAL;
-		}
-		runtime->skip_pending = false;
-		action->type = RB_ACTION_SEND_SKIP_TO;
-	} else {
-		slot = rb_tx_window_next_repair(&core->downlink_history);
-		if (slot == NULL || slot->sequence != runtime->missing_sequence) {
-			return -ENOENT;
-		}
-		if (rb_data_encode(RB_FRAME_REPAIR_DATA,
-				   core->config.master_session,
-				   rb_membership_peer(&core->membership, node_id)->lease_id,
-				   (uint16_t)core->downlink_epoch, slot->sequence,
-				   slot->data, slot->data_len, action->wire,
-				   sizeof(action->wire), &action->wire_len) != 0) {
-			return -EINVAL;
-		}
-		runtime->repair_pending = false;
-		action->type = RB_ACTION_SEND_REPAIR;
-	}
-	action->node_id = node_id;
-	action->pipe = node_id;
-	action->no_ack = false;
-	action->due_tick = now_us;
-	core->transaction_in_flight = true;
-	core->in_flight_node = node_id;
-	core->in_flight_pipe = node_id;
 	core->in_flight_type = action->type;
 	return 0;
 }
@@ -543,14 +471,13 @@ static void slave_handle_rx(struct rb_scheduler_core *core,
 		core->slave_assign_rx_active = false;
 		core->slave_group_rx_pending = true;
 		core->slave_hello_pending = false;
+		core->slave_last_downlink_sequence = 0u;
 		(void)rb_slave_lease_assign(&core->slave_lease,
 					   core->config.master_session,
 					   assign.node_id,
 					   assign.common.lease_id,
 					   now_us);
 		core->slave_ack_pending = false;
-		rb_rx_window_reset_epoch(&core->slave_rx_window,
-						 (uint16_t)assign.downlink_epoch, 1u);
 		slave_prepare_ack(core, 0u);
 		return;
 	}
@@ -592,31 +519,38 @@ static void slave_handle_rx(struct rb_scheduler_core *core,
 		slave_prepare_ack(core, poll.poll_sequence);
 		return;
 	}
-	if ((common.type == RB_FRAME_DOWNLINK_DATA ||
-	     common.type == RB_FRAME_REPAIR_DATA) && core->slave_active) {
+	if (common.type == RB_FRAME_DOWNLINK_DATA && core->slave_active) {
 		struct rb_data_frame data;
+		uint32_t distance;
+
 		if (rb_data_decode(event->wire, event->wire_len, &data) != 0 ||
 		    data.common.master_session != core->config.master_session ||
 		    data.common.lease_id != 0u ||
-		    data.stream_epoch != core->slave_downlink_epoch) {
+		    data.stream_epoch != core->slave_downlink_epoch ||
+		    data.sequence == 0u) {
 			return;
 		}
-		if (rb_rx_window_insert(&core->slave_rx_window, data.sequence,
-					data.payload, data.payload_len) != 0) {
+		if (core->slave_last_downlink_sequence != 0u &&
+		    (data.sequence == core->slave_last_downlink_sequence ||
+		     rb_seq_before(data.sequence, core->slave_last_downlink_sequence))) {
+			core->downlink_duplicate_count++;
 			return;
 		}
-		for (;;) {
-			uint8_t payload[RB_PACKET_DATA_MAX];
-			uint32_t sequence;
-			size_t payload_len;
-			if (rb_rx_window_pop(&core->slave_rx_window, &sequence,
-						 payload, sizeof(payload), &payload_len) != 0) {
-				break;
+		if (core->slave_last_downlink_sequence == 0u) {
+			distance = data.sequence;
+		} else {
+			distance = data.sequence - core->slave_last_downlink_sequence;
+			if (data.sequence < core->slave_last_downlink_sequence) {
+				distance--;
 			}
-			(void)queue_append(core->slave_uart_queue, &core->slave_uart_head,
-					    &core->slave_uart_count, payload, payload_len,
-					    &core->queue_drop_bytes);
 		}
+		if (distance > 1u) {
+			core->downlink_gap_count += distance - 1u;
+		}
+		(void)queue_append(core->slave_uart_queue, &core->slave_uart_head,
+				    &core->slave_uart_count, data.payload, data.payload_len,
+				    &core->queue_drop_bytes);
+		core->slave_last_downlink_sequence = data.sequence;
 	}
 }
 
@@ -740,11 +674,6 @@ void rb_scheduler_init(struct rb_scheduler_core *core,
 	core->next_sync_tick = core->config.sync_interval_us;
 	rb_membership_init(&core->membership, core->config.master_session,
 			   core->config.lease_timeout_us);
-	rb_tx_window_init(&core->downlink_history,
-			  (uint16_t)core->downlink_epoch, core->downlink_slots,
-			  RB_LINK_WINDOW_SIZE);
-	rb_rx_window_init(&core->slave_rx_window, 1u, 1u,
-				  core->slave_rx_slots, RB_LINK_WINDOW_SIZE);
 	rb_slave_lease_init(&core->slave_lease, core->config.lease_timeout_us);
 }
 
@@ -952,19 +881,6 @@ int rb_scheduler_next_action(struct rb_scheduler_core *core, uint64_t now_us,
 		core->in_flight_type = action->type;
 		return 0;
 	}
-	for (uint8_t i = 0; i < RB_SCHEDULER_MAX_PEERS; i++) {
-		uint8_t node_id = (uint8_t)(((core->poll_cursor + i) %
-					 RB_SCHEDULER_MAX_PEERS) + 1u);
-		struct rb_scheduler_peer_runtime *runtime = peer_runtime(core, node_id);
-		if (runtime == NULL || !peer_schedulable(core, node_id) ||
-			(!runtime->repair_pending && !runtime->skip_pending)) {
-			continue;
-		}
-	core->poll_cursor = node_id % RB_SCHEDULER_MAX_PEERS;
-		if (build_repair_or_skip(core, node_id, now_us, action) == 0) {
-			return 0;
-		}
-	}
 	if (core->queued_broadcast) {
 		return build_broadcast(core, now_us, action);
 	}
@@ -1044,22 +960,7 @@ void rb_scheduler_action_failed(struct rb_scheduler_core *core,
 		core->slave_hello_pending = true;
 		core->slave_hello_due_tick = retry_due;
 		break;
-	case RB_ACTION_SEND_REPAIR:
-		runtime = peer_runtime(core, node_id);
-		if (runtime != NULL) {
-			runtime->repair_pending = true;
-		}
-		break;
-	case RB_ACTION_SEND_SKIP_TO:
-		runtime = peer_runtime(core, node_id);
-		if (runtime != NULL) {
-			runtime->skip_pending = true;
-		}
-		break;
 	case RB_ACTION_SEND_DOWNLINK_BROADCAST:
-		memcpy(core->queued_wire, action->wire, action->wire_len);
-		core->queued_wire_len = action->wire_len;
-		core->queued_broadcast = true;
 		break;
 	case RB_ACTION_SEND_ASSIGN:
 		{
@@ -1174,14 +1075,13 @@ void rb_scheduler_on_radio_event(struct rb_scheduler_core *core,
 			    ack.common.lease_id != rb_membership_peer(&core->membership,
 								      node_id)->lease_id ||
 			    ack.uplink_epoch != (uint16_t)core->uplink_epoch ||
-			    ack.downlink_epoch != (uint16_t)core->downlink_epoch ||
 			    (ack.payload_len != 0u && ack.uplink_sequence == 0u)) {
 				core->invalid_session_rx_count++;
 				return;
 			}
 			/* Duplicate detection: if the uplink sequence is at or behind
 			 * what we last acknowledged, this is a retransmit we already
-			 * delivered — count it but still process the downlink ACK bitmap. */
+			 * delivered. */
 			if (ack.payload_len != 0u && runtime->uplink_ack_base != 0u &&
 			    (ack.uplink_sequence == runtime->uplink_ack_base ||
 			     rb_seq_before(ack.uplink_sequence,
@@ -1195,9 +1095,6 @@ void rb_scheduler_on_radio_event(struct rb_scheduler_core *core,
 					rb_scheduler_mark_peer_idle(core, node_id, now_us);
 				}
 			rb_membership_note_success(&core->membership, node_id, now_us);
-			rb_scheduler_note_downlink_ack(core, node_id,
-						       ack.downlink_ack_base,
-						       ack.downlink_ack_bitmap);
 			if (ack.payload_len != 0u && !duplicate) {
 				runtime->uplink_ack_base = ack.uplink_sequence;
 				(void)queue_append(core->master_rx_queue,
@@ -1208,31 +1105,6 @@ void rb_scheduler_on_radio_event(struct rb_scheduler_core *core,
 			}
 		}
 	}
-}
-
-void rb_scheduler_note_downlink_ack(struct rb_scheduler_core *core,
-					uint8_t node_id, uint32_t ack_base,
-					uint64_t ack_bitmap)
-{
-	struct rb_scheduler_peer_runtime *runtime;
-	uint32_t missing;
-
-	if (core == NULL || !node_valid(node_id) || !peer_schedulable(core, node_id)) {
-		return;
-	}
-	runtime = peer_runtime(core, node_id);
-	/* Release confirmed TX history slots so the window does not stay full
-	 * and force unnecessary SKIP_TO for every subsequent peer. */
-	rb_tx_window_apply_ack(&core->downlink_history, ack_base, ack_bitmap);
-	missing = ack_base + 1u;
-	if (missing == core->next_downlink_sequence ||
-		(ack_bitmap & UINT64_C(1)) != 0u) {
-		return;
-	}
-	runtime->missing_sequence = missing;
-	runtime->repair_pending = true;
-	runtime->skip_pending = !rb_tx_window_contains(&core->downlink_history,
-						       missing);
 }
 
 void rb_scheduler_mark_peer_idle(struct rb_scheduler_core *core,
@@ -1328,17 +1200,20 @@ uint64_t rb_scheduler_queue_drop_bytes(const struct rb_scheduler_core *core)
 	return core == NULL ? 0u : core->queue_drop_bytes;
 }
 
-bool rb_scheduler_take_evicted(struct rb_scheduler_core *core, uint32_t *sequence)
-{
-	if (core == NULL || sequence == NULL) {
-		return false;
-	}
-	return rb_tx_window_take_evicted(&core->downlink_history, sequence);
-}
-
 uint64_t rb_scheduler_duplicate_count(const struct rb_scheduler_core *core)
 {
 	return core == NULL ? 0u : core->duplicate_rx_count;
+}
+
+uint64_t rb_scheduler_downlink_gap_count(const struct rb_scheduler_core *core)
+{
+	return core == NULL ? 0u : core->downlink_gap_count;
+}
+
+uint64_t rb_scheduler_downlink_duplicate_count(
+	const struct rb_scheduler_core *core)
+{
+	return core == NULL ? 0u : core->downlink_duplicate_count;
 }
 
 uint64_t rb_scheduler_invalid_session_count(const struct rb_scheduler_core *core)
@@ -1399,12 +1274,10 @@ int rb_scheduler_reset_session(struct rb_scheduler_core *core,
 	core->slave_uplink_inflight_len = 0u;
 	core->slave_uplink_head = 0u;
 	core->slave_uplink_count = 0u;
+	core->slave_last_downlink_sequence = 0u;
 	core->slave_uart_head = 0u;
 	core->slave_uart_count = 0u;
 	core->next_sync_tick = core->config.sync_interval_us;
-	rb_rx_window_reset_epoch(&core->slave_rx_window, 1u, 1u);
-	rb_tx_window_reset_epoch(&core->downlink_history,
-				 (uint16_t)core->downlink_epoch);
 	return 0;
 }
 

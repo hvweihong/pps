@@ -51,15 +51,7 @@
 
 #define RB_ACK_UPLINK_EPOCH_OFFSET RB_COMMON_HEADER_SIZE
 #define RB_ACK_UPLINK_SEQUENCE_OFFSET (RB_ACK_UPLINK_EPOCH_OFFSET + 2u)
-#define RB_ACK_DOWNLINK_EPOCH_OFFSET (RB_ACK_UPLINK_SEQUENCE_OFFSET + 4u)
-#define RB_ACK_DOWNLINK_BASE_OFFSET (RB_ACK_DOWNLINK_EPOCH_OFFSET + 2u)
-#define RB_ACK_DOWNLINK_BITMAP_OFFSET (RB_ACK_DOWNLINK_BASE_OFFSET + 4u)
-#define RB_ACK_DROP_COUNT_OFFSET (RB_ACK_DOWNLINK_BITMAP_OFFSET + 8u)
-
-#define RB_SKIP_DIRECTION_OFFSET RB_COMMON_HEADER_SIZE
-#define RB_SKIP_EPOCH_OFFSET (RB_SKIP_DIRECTION_OFFSET + 1u)
-#define RB_SKIP_NEXT_SEQUENCE_OFFSET (RB_SKIP_EPOCH_OFFSET + 2u)
-#define RB_SKIP_DROP_COUNT_OFFSET (RB_SKIP_NEXT_SEQUENCE_OFFSET + 4u)
+#define RB_ACK_DROP_COUNT_OFFSET (RB_ACK_UPLINK_SEQUENCE_OFFSET + 4u)
 
 _Static_assert(RB_SYNC_TIME_QUALITY_OFFSET + 1u ==
 		       RB_SYNC_DISCOVERY_WIRE_SIZE,
@@ -73,9 +65,7 @@ _Static_assert(RB_ASSIGN_LEASE_TIMEOUT_OFFSET + 4u == RB_ASSIGN_WIRE_SIZE,
 _Static_assert(RB_POLL_SEQUENCE_OFFSET + 2u == RB_POLL_WIRE_SIZE,
 		       "poll wire layout must remain 30 bytes");
 _Static_assert(RB_ACK_DROP_COUNT_OFFSET + 4u == RB_ACK_UPLINK_HEADER_SIZE,
-		       "ack uplink wire header must remain 36 bytes");
-_Static_assert(RB_SKIP_DROP_COUNT_OFFSET + 4u == RB_SKIP_TO_WIRE_SIZE,
-		       "skip-to wire layout must remain 23 bytes");
+		       "ack uplink wire header must remain 22 bytes");
 
 static bool frame_type_valid(uint8_t type)
 {
@@ -84,10 +74,8 @@ static bool frame_type_valid(uint8_t type)
 	case RB_FRAME_HELLO:
 	case RB_FRAME_ASSIGN:
 	case RB_FRAME_DOWNLINK_DATA:
-	case RB_FRAME_REPAIR_DATA:
 	case RB_FRAME_POLL:
 	case RB_FRAME_ACK_UPLINK:
-	case RB_FRAME_SKIP_TO:
 		return true;
 	default:
 		return false;
@@ -96,7 +84,7 @@ static bool frame_type_valid(uint8_t type)
 
 static bool data_type_valid(uint8_t type)
 {
-	return type == RB_FRAME_DOWNLINK_DATA || type == RB_FRAME_REPAIR_DATA;
+	return type == RB_FRAME_DOWNLINK_DATA;
 }
 
 static bool time_quality_valid(uint8_t quality)
@@ -584,8 +572,7 @@ int rb_ack_uplink_encode(const struct rb_ack_uplink *frame,
 	size_t total_len;
 	int ret;
 
-	if (frame == NULL || frame->uplink_epoch == 0 ||
-	    frame->downlink_epoch == 0) {
+	if (frame == NULL || frame->uplink_epoch == 0) {
 		return -EINVAL;
 	}
 	if (frame->payload == NULL && frame->payload_len != 0) {
@@ -603,10 +590,6 @@ int rb_ack_uplink_encode(const struct rb_ack_uplink *frame,
 
 	sys_put_le16(frame->uplink_epoch, &wire[RB_ACK_UPLINK_EPOCH_OFFSET]);
 	sys_put_le32(frame->uplink_sequence, &wire[RB_ACK_UPLINK_SEQUENCE_OFFSET]);
-	sys_put_le16(frame->downlink_epoch, &wire[RB_ACK_DOWNLINK_EPOCH_OFFSET]);
-	sys_put_le32(frame->downlink_ack_base, &wire[RB_ACK_DOWNLINK_BASE_OFFSET]);
-	sys_put_le64(frame->downlink_ack_bitmap,
-		     &wire[RB_ACK_DOWNLINK_BITMAP_OFFSET]);
 	sys_put_le32(frame->drop_count, &wire[RB_ACK_DROP_COUNT_OFFSET]);
 	if (frame->payload_len != 0) {
 		memcpy(&wire[RB_ACK_UPLINK_HEADER_SIZE], frame->payload,
@@ -638,68 +621,14 @@ int rb_ack_uplink_decode(const uint8_t *wire, size_t wire_len,
 	}
 
 	decoded.uplink_epoch = sys_get_le16(&wire[RB_ACK_UPLINK_EPOCH_OFFSET]);
-	decoded.downlink_epoch = sys_get_le16(&wire[RB_ACK_DOWNLINK_EPOCH_OFFSET]);
-	if (decoded.uplink_epoch == 0 || decoded.downlink_epoch == 0) {
+	if (decoded.uplink_epoch == 0) {
 		return -EINVAL;
 	}
 	decoded.uplink_sequence =
 		sys_get_le32(&wire[RB_ACK_UPLINK_SEQUENCE_OFFSET]);
-	decoded.downlink_ack_base = sys_get_le32(&wire[RB_ACK_DOWNLINK_BASE_OFFSET]);
-	decoded.downlink_ack_bitmap =
-		sys_get_le64(&wire[RB_ACK_DOWNLINK_BITMAP_OFFSET]);
 	decoded.drop_count = sys_get_le32(&wire[RB_ACK_DROP_COUNT_OFFSET]);
 	decoded.payload = &wire[RB_ACK_UPLINK_HEADER_SIZE];
 	decoded.payload_len = wire_len - RB_ACK_UPLINK_HEADER_SIZE;
-	*frame = decoded;
-
-	return 0;
-}
-
-int rb_skip_to_encode(const struct rb_skip_to *frame,
-			  uint8_t *wire, size_t wire_size, size_t *wire_len)
-{
-	int ret;
-
-	if (frame == NULL || frame->stream_epoch == 0) {
-		return -EINVAL;
-	}
-	ret = fixed_control_encode(&frame->common, RB_FRAME_SKIP_TO, wire,
-				   wire_size, RB_SKIP_TO_WIRE_SIZE, wire_len);
-	if (ret != 0) {
-		return ret;
-	}
-
-	wire[RB_SKIP_DIRECTION_OFFSET] = frame->direction;
-	sys_put_le16(frame->stream_epoch, &wire[RB_SKIP_EPOCH_OFFSET]);
-	sys_put_le32(frame->next_sequence, &wire[RB_SKIP_NEXT_SEQUENCE_OFFSET]);
-	sys_put_le32(frame->drop_count, &wire[RB_SKIP_DROP_COUNT_OFFSET]);
-	*wire_len = RB_SKIP_TO_WIRE_SIZE;
-
-	return 0;
-}
-
-int rb_skip_to_decode(const uint8_t *wire, size_t wire_len,
-			  struct rb_skip_to *frame)
-{
-	struct rb_skip_to decoded;
-	int ret;
-
-	if (frame == NULL) {
-		return -EINVAL;
-	}
-	ret = fixed_control_decode(wire, wire_len, RB_FRAME_SKIP_TO,
-				   RB_SKIP_TO_WIRE_SIZE, &decoded.common);
-	if (ret != 0) {
-		return ret;
-	}
-
-	decoded.direction = wire[RB_SKIP_DIRECTION_OFFSET];
-	decoded.stream_epoch = sys_get_le16(&wire[RB_SKIP_EPOCH_OFFSET]);
-	if (decoded.stream_epoch == 0) {
-		return -EINVAL;
-	}
-	decoded.next_sequence = sys_get_le32(&wire[RB_SKIP_NEXT_SEQUENCE_OFFSET]);
-	decoded.drop_count = sys_get_le32(&wire[RB_SKIP_DROP_COUNT_OFFSET]);
 	*frame = decoded;
 
 	return 0;

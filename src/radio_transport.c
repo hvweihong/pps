@@ -120,23 +120,39 @@ static void radio_boot_diagnostic_begin(enum rb_radio_profile profile)
 
 #ifdef CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION
 /* Bitmask of rb_frame_type values that should be dropped, and a 1-of-N
- * counter. Zero in type_mask means drop no frames by type; N=0 disables
- * the every-N counter. Both conditions are AND-ed when both are non-zero,
- * OR-ed when only one is set. */
+ * counter. The cadence counts only frames selected by the mask. */
 static uint32_t loss_type_mask;
 static uint32_t loss_every_n;
 static uint32_t loss_counter;
 static bool loss_injector_should_drop(uint8_t frame_type)
 {
-	bool by_type = loss_type_mask != 0u &&
-		       (loss_type_mask & (1u << frame_type)) != 0u;
-	bool by_n = loss_every_n != 0u &&
-		    (++loss_counter % loss_every_n) == 0u;
-	if (loss_type_mask != 0u && loss_every_n != 0u) {
-		return by_type && by_n;
+	if (frame_type >= 32u) {
+		return false;
 	}
-	return by_type || by_n;
+	if (loss_type_mask != 0u &&
+	    (loss_type_mask & (1u << frame_type)) == 0u) {
+		return false;
+	}
+	if (loss_every_n == 0u) {
+		return loss_type_mask != 0u;
+	}
+	loss_counter++;
+	return (loss_counter % loss_every_n) == 0u;
 }
+
+static int queue_injected_tx_success(void)
+{
+	struct rb_radio_event event = {
+		.type = RB_RADIO_EVENT_TX_SUCCESS,
+	};
+	int ret = k_msgq_put(&event_queue, &event, K_NO_WAIT);
+
+	if (ret == 0 && wake_callback != NULL) {
+		wake_callback();
+	}
+	return ret;
+}
+
 void radio_transport_loss_set(uint32_t type_mask, uint32_t every_n)
 {
 	loss_type_mask = type_mask;
@@ -389,7 +405,7 @@ int radio_transport_send(uint8_t pipe, bool no_ack,
 #ifdef CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION
 	/* byte 3 is the frame type in the "RB" common header */
 	if (len >= 4 && loss_injector_should_drop(payload.data[3])) {
-		return 0;
+		return queue_injected_tx_success();
 	}
 #endif
 	err = esb_write_payload(&payload);

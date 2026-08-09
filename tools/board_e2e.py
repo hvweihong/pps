@@ -553,6 +553,13 @@ def _require_runtime_zero_drops(output: str, board: str) -> None:
             raise GateError(f"{board}: {field}={value}, expected zero")
 
 
+def _bridge_stat_value(output: str, field: str) -> int:
+    matches = re.findall(rf"\b{re.escape(field)}=(\d+)\b", output)
+    if not matches:
+        raise GateError(f"bridge stat field is missing: {field}")
+    return int(matches[-1])
+
+
 def _wait_for_fresh_runtime_zero_drops(board: BoardSession) -> None:
     history_mark = board.history_mark()
     deadline = time.monotonic() + max(STATUS_TIMEOUT_S, board.command_timeout * 3.0)
@@ -687,6 +694,103 @@ def _run_bidirectional_bridge_gate(
         _wait_for_fresh_time_uart_zero_errors(board)
 
 
+def _run_downlink_loss_gate(
+    master: BoardSession,
+    slave: BoardSession,
+    bridge_length: int,
+    every_n: int,
+) -> None:
+    stats = slave.command("bridge_test stats")
+    initial_gap = _bridge_stat_value(stats, "downlink_gap")
+    if initial_gap != 0:
+        raise GateError(f"slave: downlink_gap={initial_gap}, expected zero before loss")
+
+    command = f"bridge_test loss 4 {every_n}"
+    output = master.command(command)
+    _expect(
+        output,
+        f"bridge_test loss ok mask=0x00000010 every_n={every_n}",
+        master.label,
+        command,
+    )
+    try:
+        for seed in (49, 98):
+            command = f"bridge_test inject {bridge_length} {seed}"
+            output = master.command(command)
+            _expect(
+                output,
+                f"bridge_test inject ok len={bridge_length} seed={seed}",
+                master.label,
+                command,
+            )
+
+        deadline = time.monotonic() + max(BRIDGE_TIMEOUT_S, slave.command_timeout * 3.0)
+        last_stats = ""
+        while time.monotonic() < deadline:
+            last_stats = slave.command("bridge_test stats")
+            if _bridge_stat_value(last_stats, "downlink_gap") > initial_gap:
+                break
+            time.sleep(0.1)
+        else:
+            raise GateError(
+                "slave: downlink gap counter did not increase under injected loss: "
+                f"{last_stats[-512:]}"
+            )
+
+        command = f"bridge_test inject {bridge_length} 147"
+        output = slave.command(command)
+        _expect(
+            output,
+            f"bridge_test inject ok len={bridge_length} seed=147",
+            slave.label,
+            command,
+        )
+        _wait_for_verify(
+            master, bridge_length, 147, "loss-active-slave-to-master"
+        )
+    finally:
+        output = master.command("bridge_test loss_off")
+        _expect(
+            output,
+            "bridge_test loss_off ok mask=0x00000000 every_n=0",
+            master.label,
+            "bridge_test loss_off",
+        )
+
+    for board in (master, slave):
+        output = board.command("bridge_test clear")
+        _expect(output, "bridge_test clear ok", board.label, "bridge_test clear")
+
+    command = f"bridge_test inject {bridge_length} 196"
+    output = master.command(command)
+    _expect(
+        output,
+        f"bridge_test inject ok len={bridge_length} seed=196",
+        master.label,
+        command,
+    )
+    _wait_for_verify(slave, bridge_length, 196, "loss-off-master-to-slave")
+    final_stats = slave.command("bridge_test stats")
+    final_gap = _bridge_stat_value(final_stats, "downlink_gap")
+    if final_gap <= initial_gap:
+        raise GateError(
+            f"slave: downlink_gap={final_gap}, expected greater than {initial_gap}"
+        )
+    for board in (master, slave):
+        stats = board.command("bridge_test stats")
+        _require_zero_drops(stats, board.label)
+        _wait_for_fresh_runtime_zero_drops(board)
+        _wait_for_fresh_time_uart_zero_errors(board)
+    master.event(
+        f"downlink loss gate PASS frame_type=4 every_n={every_n} "
+        f"slave_gap_before={initial_gap} slave_gap_after={final_gap}"
+    )
+    slave.event(
+        f"downlink loss gate PASS frame_type=4 every_n={every_n} "
+        f"slave_gap_before={initial_gap} slave_gap_after={final_gap}"
+    )
+
+
 def _run_cold_reboot_cycles(
     master: BoardSession, slave: BoardSession, cycles: int, bridge_length: int
 ) -> None:
@@ -782,6 +886,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Post-gate radio and UART health observation window",
     )
     parser.add_argument("--bridge-length", type=int, default=600)
+    parser.add_argument(
+        "--downlink-loss-every-n",
+        type=int,
+        default=0,
+        help="Run best-effort downlink loss gate; 0 disables, otherwise use N >= 2",
+    )
     parser.add_argument("--command-timeout", type=float, default=10.0)
     return parser
 
@@ -809,6 +919,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             raise GateError(
                 f"--bridge-length must be in [1, {BRIDGE_MAX_LENGTH}]"
             )
+        if args.downlink_loss_every_n < 0 or args.downlink_loss_every_n == 1:
+            raise GateError("--downlink-loss-every-n must be 0 or >= 2")
         if args.command_timeout <= 0:
             raise GateError("--command-timeout must be > 0")
         for name, uf2 in (("master", args.master_uf2), ("slave", args.slave_uf2)):
@@ -834,6 +946,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         try:
             for cycle in range(1, args.cycles + 1):
                 _run_cycle(master, slave, cycle, args.cycles, args.bridge_length)
+            if args.downlink_loss_every_n:
+                _run_downlink_loss_gate(
+                    master,
+                    slave,
+                    args.bridge_length,
+                    args.downlink_loss_every_n,
+                )
             if args.cold_reboots_per_board:
                 _run_cold_reboot_cycles(
                     master, slave, args.cold_reboots_per_board, args.bridge_length
@@ -845,6 +964,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(
                 "BOARD_E2E PASS "
                 f"stage={args.stage} cycles={args.cycles} length={args.bridge_length} "
+                f"downlink_loss_every_n={args.downlink_loss_every_n} "
                 f"cold_reboots_per_board={args.cold_reboots_per_board} "
                 f"master_flashes={master.flash_count} slave_flashes={slave.flash_count} "
                 f"master_flash_retries={master.flash_retry_count} "

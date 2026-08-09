@@ -15,8 +15,6 @@ enum rb_scheduler_action_type {
 	RB_ACTION_ENTER_DISCOVERY_RX,
 	RB_ACTION_SEND_ASSIGN,
 	RB_ACTION_SEND_DOWNLINK_BROADCAST,
-	RB_ACTION_SEND_REPAIR,
-	RB_ACTION_SEND_SKIP_TO,
 	RB_ACTION_SEND_POLL,
 	RB_ACTION_QUEUE_ACK,
 	RB_ACTION_SEND_HELLO,
@@ -80,10 +78,7 @@ struct rb_scheduler_peer_runtime {
 	uint32_t poll_interval_us;
 	uint32_t poll_sequence;
 	uint32_t uplink_ack_base;
-	uint32_t missing_sequence;
 	bool data_ready;
-	bool repair_pending;
-	bool skip_pending;
 	bool poll_retry_backoff;
 };
 
@@ -126,8 +121,6 @@ struct rb_scheduler_core {
 	bool in_flight_poll_data_ready;
 	uint16_t next_lease_id;
 	uint16_t next_stream_epoch;
-	struct rb_packet_slot downlink_slots[RB_LINK_WINDOW_SIZE];
-	struct rb_tx_window downlink_history;
 	/* Candidate/assigned-slave state is kept here so the same pure core can
 	 * serve Task 13 without a second scheduler implementation. */
 	bool slave_active;
@@ -153,8 +146,7 @@ struct rb_scheduler_core {
 	uint32_t slave_uplink_inflight_sequence;
 	size_t slave_uplink_inflight_len;
 	bool slave_uplink_inflight;
-	struct rb_packet_slot slave_rx_slots[RB_LINK_WINDOW_SIZE];
-	struct rb_rx_window slave_rx_window;
+	uint32_t slave_last_downlink_sequence;
 	struct rb_slave_lease slave_lease;
 	uint8_t slave_uart_queue[RB_SCHEDULER_UART_QUEUE_SIZE];
 	uint16_t slave_uart_head;
@@ -168,6 +160,8 @@ struct rb_scheduler_core {
 	uint16_t master_rx_count;
 	uint64_t queue_drop_bytes;
 	uint64_t duplicate_rx_count;
+	uint64_t downlink_gap_count;
+	uint64_t downlink_duplicate_count;
 	uint64_t invalid_session_rx_count;
 	struct rb_scheduler_time_publication time_publication;
 };
@@ -190,9 +184,6 @@ void rb_scheduler_action_failed(struct rb_scheduler_core *core,
 void rb_scheduler_on_radio_event(struct rb_scheduler_core *core,
 				 const struct rb_radio_event_view *event,
 				 uint64_t now_us);
-void rb_scheduler_note_downlink_ack(struct rb_scheduler_core *core,
-					uint8_t node_id, uint32_t ack_base,
-					uint64_t ack_bitmap);
 void rb_scheduler_mark_peer_idle(struct rb_scheduler_core *core,
 					 uint8_t node_id, uint64_t now_us);
 void rb_scheduler_mark_peer_data(struct rb_scheduler_core *core,
@@ -212,8 +203,10 @@ uint32_t rb_scheduler_peer_poll_interval(const struct rb_scheduler_core *core,
 						 uint8_t node_id);
 uint8_t rb_scheduler_active_count(const struct rb_scheduler_core *core);
 uint64_t rb_scheduler_queue_drop_bytes(const struct rb_scheduler_core *core);
-bool rb_scheduler_take_evicted(struct rb_scheduler_core *core, uint32_t *sequence);
 uint64_t rb_scheduler_duplicate_count(const struct rb_scheduler_core *core);
+uint64_t rb_scheduler_downlink_gap_count(const struct rb_scheduler_core *core);
+uint64_t rb_scheduler_downlink_duplicate_count(
+	const struct rb_scheduler_core *core);
 uint64_t rb_scheduler_invalid_session_count(const struct rb_scheduler_core *core);
 uint32_t rb_scheduler_session(const struct rb_scheduler_core *core);
 int rb_scheduler_reset_session(struct rb_scheduler_core *core,

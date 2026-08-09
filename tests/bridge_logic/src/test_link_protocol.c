@@ -321,9 +321,6 @@ ZTEST(link_protocol, test_ack_uplink_round_trip)
 		.common = RB_COMMON_INIT(RB_FRAME_ACK_UPLINK, 0x1234, 0x55aa, 2),
 		.uplink_epoch = 4,
 		.uplink_sequence = 91,
-		.downlink_epoch = 8,
-		.downlink_ack_base = 77,
-		.downlink_ack_bitmap = UINT64_C(0x8000000000000005),
 		.drop_count = 3,
 		.payload = bytes,
 		.payload_len = sizeof(bytes),
@@ -333,51 +330,18 @@ ZTEST(link_protocol, test_ack_uplink_round_trip)
 	size_t len = 0;
 
 	zassert_ok(rb_ack_uplink_encode(&in, wire, sizeof(wire), &len));
+	zassert_equal(RB_ACK_UPLINK_HEADER_SIZE, 22u);
 	zassert_equal(len, RB_ACK_UPLINK_HEADER_SIZE + sizeof(bytes));
-	zassert_equal(wire[24], 0x05);
-	zassert_equal(wire[31], 0x80);
-	zassert_equal(wire[32], 0x03);
-	zassert_equal(wire[35], 0x00);
+	zassert_equal(wire[14], 0x5b);
+	zassert_equal(wire[18], 0x03);
+	zassert_equal(wire[21], 0x00);
 	zassert_ok(rb_ack_uplink_decode(wire, len, &out));
 	zassert_equal(out.common.source_node, 2);
 	zassert_equal(out.uplink_epoch, in.uplink_epoch);
 	zassert_equal(out.uplink_sequence, in.uplink_sequence);
-	zassert_equal(out.downlink_epoch, in.downlink_epoch);
-	zassert_equal(out.downlink_ack_base, in.downlink_ack_base);
-	zassert_equal(out.downlink_ack_bitmap, in.downlink_ack_bitmap);
 	zassert_equal(out.drop_count, in.drop_count);
 	zassert_equal(out.payload_len, sizeof(bytes));
 	zassert_mem_equal(out.payload, bytes, sizeof(bytes));
-}
-
-ZTEST(link_protocol, test_skip_to_round_trip)
-{
-	struct rb_skip_to in = {
-		.common = RB_COMMON_INIT(RB_FRAME_SKIP_TO, 0x01020304, 0x0506, 3),
-		.direction = 0x07,
-		.stream_epoch = 0x0809,
-		.next_sequence = 0x0a0b0c0d,
-		.drop_count = 0x0e0f1011,
-	};
-	struct rb_skip_to out;
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	size_t len = 0;
-
-	zassert_ok(rb_skip_to_encode(&in, wire, sizeof(wire), &len));
-	zassert_equal(len, RB_SKIP_TO_WIRE_SIZE);
-	zassert_equal(wire[12], 0x07);
-	zassert_equal(wire[13], 0x09);
-	zassert_equal(wire[15], 0x0d);
-	zassert_equal(wire[19], 0x11);
-	zassert_equal(wire[22], 0x0e);
-	zassert_ok(rb_skip_to_decode(wire, len, &out));
-	zassert_equal(out.common.master_session, in.common.master_session);
-	zassert_equal(out.common.lease_id, in.common.lease_id);
-	zassert_equal(out.common.source_node, in.common.source_node);
-	zassert_equal(out.direction, in.direction);
-	zassert_equal(out.stream_epoch, in.stream_epoch);
-	zassert_equal(out.next_sequence, in.next_sequence);
-	zassert_equal(out.drop_count, in.drop_count);
 }
 
 ZTEST(link_protocol, test_hello_rejects_non_candidate_header)
@@ -464,12 +428,6 @@ ZTEST(link_protocol, test_control_codecs_reject_wrong_type_and_length)
 		.uplink_epoch = 3,
 	};
 	struct rb_poll poll_out;
-	struct rb_skip_to skip = {
-		.common = RB_COMMON_INIT(RB_FRAME_SKIP_TO, 1, 2, 1),
-		.direction = 1,
-		.stream_epoch = 3,
-	};
-	struct rb_skip_to skip_out;
 	uint8_t wire[RB_ESB_MAX_PAYLOAD + 1];
 	size_t len;
 
@@ -481,10 +439,6 @@ ZTEST(link_protocol, test_control_codecs_reject_wrong_type_and_length)
 	zassert_equal(rb_poll_decode(wire, len - 1, &poll_out), -EMSGSIZE);
 	wire[3] = RB_FRAME_HELLO;
 	zassert_equal(rb_poll_decode(wire, len, &poll_out), -EINVAL);
-	zassert_ok(rb_skip_to_encode(&skip, wire, sizeof(wire), &len));
-	zassert_equal(rb_skip_to_decode(wire, len - 1, &skip_out), -EMSGSIZE);
-	wire[3] = RB_FRAME_ACK_UPLINK;
-	zassert_equal(rb_skip_to_decode(wire, len, &skip_out), -EINVAL);
 }
 
 ZTEST(link_protocol, test_ack_payload_uses_esb_frame_length)
@@ -494,9 +448,6 @@ ZTEST(link_protocol, test_ack_payload_uses_esb_frame_length)
 		.common = RB_COMMON_INIT(RB_FRAME_ACK_UPLINK, 1, 2, 1),
 		.uplink_epoch = 3,
 		.uplink_sequence = 4,
-		.downlink_epoch = 5,
-		.downlink_ack_base = 6,
-		.downlink_ack_bitmap = 7,
 		.drop_count = 8,
 		.payload = bytes,
 		.payload_len = sizeof(bytes),

@@ -14,10 +14,9 @@
 #define RB_HELLO_WIRE_SIZE 28u
 #define RB_ASSIGN_WIRE_SIZE 34u
 #define RB_POLL_WIRE_SIZE 30u
-#define RB_ACK_UPLINK_HEADER_SIZE 36u
+#define RB_ACK_UPLINK_HEADER_SIZE 22u
 #define RB_ACK_UPLINK_PAYLOAD_MAX \
 	(RB_ESB_MAX_PAYLOAD - RB_ACK_UPLINK_HEADER_SIZE)
-#define RB_SKIP_TO_WIRE_SIZE 23u
 #define RB_MAX_SOURCE_NODE 3u
 
 /* Compile-time guards: every frame type's maximum wire size must fit within
@@ -35,8 +34,6 @@ _Static_assert(RB_POLL_WIRE_SIZE <= RB_ESB_MAX_PAYLOAD,
 	       "POLL wire frame exceeds ESB payload limit");
 _Static_assert(RB_ACK_UPLINK_HEADER_SIZE <= RB_ESB_MAX_PAYLOAD,
 	       "ACK_UPLINK header exceeds ESB payload limit");
-_Static_assert(RB_SKIP_TO_WIRE_SIZE <= RB_ESB_MAX_PAYLOAD,
-	       "SKIP_TO wire frame exceeds ESB payload limit");
 _Static_assert(RB_DATA_HEADER_SIZE <= RB_ESB_MAX_PAYLOAD,
 	       "DATA header exceeds ESB payload limit");
 
@@ -45,10 +42,8 @@ enum rb_frame_type {
 	RB_FRAME_HELLO = 2,
 	RB_FRAME_ASSIGN = 3,
 	RB_FRAME_DOWNLINK_DATA = 4,
-	RB_FRAME_REPAIR_DATA = 5,
 	RB_FRAME_POLL = 6,
 	RB_FRAME_ACK_UPLINK = 7,
-	RB_FRAME_SKIP_TO = 8,
 };
 
 enum rb_time_quality {
@@ -127,20 +122,9 @@ struct rb_ack_uplink {
 	struct rb_common_header common;
 	uint16_t uplink_epoch;
 	uint32_t uplink_sequence;
-	uint16_t downlink_epoch;
-	uint32_t downlink_ack_base;
-	uint64_t downlink_ack_bitmap;
 	uint32_t drop_count;
 	const uint8_t *payload;
 	size_t payload_len;
-};
-
-struct rb_skip_to {
-	struct rb_common_header common;
-	uint8_t direction;
-	uint16_t stream_epoch;
-	uint32_t next_sequence;
-	uint32_t drop_count;
 };
 
 int rb_common_encode(const struct rb_common_header *header,
@@ -170,12 +154,8 @@ int rb_poll_encode(const struct rb_poll *frame,
 int rb_poll_decode(const uint8_t *wire, size_t wire_len,
 		       struct rb_poll *frame);
 int rb_ack_uplink_encode(const struct rb_ack_uplink *frame,
-			     uint8_t *wire, size_t wire_size, size_t *wire_len);
+				     uint8_t *wire, size_t wire_size, size_t *wire_len);
 int rb_ack_uplink_decode(const uint8_t *wire, size_t wire_len,
-			     struct rb_ack_uplink *frame);
-int rb_skip_to_encode(const struct rb_skip_to *frame,
-			  uint8_t *wire, size_t wire_size, size_t *wire_len);
-int rb_skip_to_decode(const uint8_t *wire, size_t wire_len,
-			  struct rb_skip_to *frame);
+				     struct rb_ack_uplink *frame);
 
 #endif /* LINK_PROTOCOL_H_ */

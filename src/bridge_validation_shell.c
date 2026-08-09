@@ -4,6 +4,7 @@
 #include <zephyr/shell/shell.h>
 
 #include "bridge_runtime.h"
+#include "radio_transport.h"
 
 static int parse_uint(const char *text, unsigned long maximum,
 		      unsigned long *value)
@@ -100,19 +101,56 @@ static int cmd_bridge_test_stats(const struct shell *shell, size_t argc,
 				 char **argv)
 {
 	struct rb_validation_stats stats;
+	struct rb_bridge_stats bridge;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	bridge_runtime_validation_stats_get(&stats);
+	bridge_runtime_stats_get(&bridge);
 	shell_print(shell, "bridge_test stats input=%zu output=%zu injected=%llu "
-		    "captured=%llu input_drop=%llu output_drop=%llu",
+		    "captured=%llu input_drop=%llu output_drop=%llu "
+		    "downlink_gap=%llu downlink_duplicate=%llu",
 		    stats.input_bytes, stats.output_bytes,
 		    (unsigned long long)stats.injected_bytes,
 		    (unsigned long long)stats.captured_bytes,
 		    (unsigned long long)stats.input_drop_bytes,
-		    (unsigned long long)stats.output_drop_bytes);
+		    (unsigned long long)stats.output_drop_bytes,
+		    (unsigned long long)bridge.downlink_gap_packets,
+		    (unsigned long long)bridge.downlink_duplicate_packets);
 	return 0;
 }
+
+#if defined(CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION)
+static int cmd_bridge_test_loss(const struct shell *shell, size_t argc,
+				char **argv)
+{
+	unsigned long frame_type;
+	unsigned long every_n;
+	uint32_t type_mask;
+
+	if (argc != 3u || parse_uint(argv[1], 31u, &frame_type) != 0 ||
+	    parse_uint(argv[2], UINT32_MAX, &every_n) != 0 ||
+	    frame_type == 0u || every_n == 0u) {
+		shell_error(shell, "usage: bridge_test loss <1..31> <1..4294967295>");
+		return -EINVAL;
+	}
+	type_mask = 1u << frame_type;
+	radio_transport_loss_set(type_mask, (uint32_t)every_n);
+	shell_print(shell, "bridge_test loss ok mask=0x%08x every_n=%lu",
+		    type_mask, every_n);
+	return 0;
+}
+
+static int cmd_bridge_test_loss_off(const struct shell *shell, size_t argc,
+				    char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	radio_transport_loss_set(0u, 0u);
+	shell_print(shell, "bridge_test loss_off ok mask=0x00000000 every_n=0");
+	return 0;
+}
+#endif
 
 static int cmd_bridge_test_dump(const struct shell *shell, size_t argc,
 				char **argv)
@@ -182,6 +220,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_bridge_test,
 		  cmd_bridge_test_stats),
 	SHELL_CMD(clear, NULL, "Clear validation queues and counters",
 		  cmd_bridge_test_clear),
+#if defined(CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION)
+	SHELL_CMD_ARG(loss, NULL, "Drop frame type at cadence: <type> <every_n>",
+		      cmd_bridge_test_loss, 3, 0),
+	SHELL_CMD(loss_off, NULL, "Disable radio packet loss injection",
+		  cmd_bridge_test_loss_off),
+#endif
 	SHELL_SUBCMD_SET_END
 );
 

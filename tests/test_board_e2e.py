@@ -360,6 +360,19 @@ class RecoveryFlashTests(unittest.TestCase):
 
 
 class RuntimeFreshnessTests(unittest.TestCase):
+    def test_bridge_stat_value_uses_latest_counter(self):
+        board_e2e = load_board_e2e()
+        bridge_stat_value = require_symbol(board_e2e, "_bridge_stat_value")
+
+        self.assertEqual(
+            bridge_stat_value(
+                "downlink_gap=1 downlink_duplicate=0\n"
+                "downlink_gap=3 downlink_duplicate=2",
+                "downlink_gap",
+            ),
+            3,
+        )
+
     def test_fresh_runtime_check_ignores_stale_nonzero_counters(self):
         board_e2e = load_board_e2e()
         wait_for_fresh = require_symbol(
@@ -790,6 +803,23 @@ class RawLogTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_downlink_loss_cadence_option_is_parsed(self):
+        board_e2e = load_board_e2e()
+        args = board_e2e.build_parser().parse_args(
+            [
+                "--stage",
+                "stage5",
+                "--master-uf2",
+                "master.uf2",
+                "--slave-uf2",
+                "slave.uf2",
+                "--downlink-loss-every-n",
+                "3",
+            ]
+        )
+
+        self.assertEqual(args.downlink_loss_every_n, 3)
+
     def test_bridge_length_above_firmware_capacity_fails(self):
         board_e2e = load_board_e2e()
         stderr = io.StringIO()

@@ -44,6 +44,27 @@ static void complete_tx(enum rb_radio_event_view_type type, uint64_t tick)
 	rb_scheduler_on_radio_event(&slave, &event, tick);
 }
 
+static void activate_slave(uint16_t downlink_epoch)
+{
+	struct rb_assign assign = {
+		.common = RB_COMMON_INIT(RB_FRAME_ASSIGN, 7, 0x55aa, 0),
+		.target_device_id = 10,
+		.node_id = 1,
+		.pipe = 1,
+		.downlink_epoch = downlink_epoch,
+		.uplink_epoch = 8,
+		.max_payload = RB_PACKET_DATA_MAX,
+		.link_window = 64,
+		.retry_count = 3,
+		.lease_timeout_us = 100000,
+	};
+	uint8_t wire[RB_ESB_MAX_PAYLOAD];
+	size_t len;
+
+	zassert_ok(rb_assign_encode(&assign, wire, sizeof(wire), &len));
+	deliver(wire, len, 10000);
+}
+
 ZTEST(slave_scheduler, test_matching_discovery_schedules_hashed_slot_hello)
 {
 	struct rb_sync_discovery sync = {
@@ -157,7 +178,7 @@ ZTEST(slave_scheduler, test_failed_ack_queue_retries_same_payload)
 	zassert_mem_equal(action.wire, expected, sizeof(expected));
 }
 
-ZTEST(slave_scheduler, test_assign_poll_ack_delay_and_ordered_downlink)
+ZTEST(slave_scheduler, test_assign_poll_ack_delay)
 {
 	struct rb_sync_discovery sync = {
 		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 9, 0, 0),
@@ -189,11 +210,7 @@ ZTEST(slave_scheduler, test_assign_poll_ack_delay_and_ordered_downlink)
 	struct rb_scheduler_action action;
 	struct rb_ack_uplink ack;
 	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	uint8_t data_wire[RB_ESB_MAX_PAYLOAD];
 	size_t len;
-	const uint8_t first[] = {'a'};
-	const uint8_t second[] = {'b'};
-	uint8_t uart[2];
 
 	init_slave();
 	zassert_ok(rb_sync_discovery_encode(&sync, wire, sizeof(wire), &len));
@@ -207,19 +224,41 @@ ZTEST(slave_scheduler, test_assign_poll_ack_delay_and_ordered_downlink)
 	/* The ACK returned for this poll is the one prepared before this poll. */
 	zassert_ok(rb_ack_uplink_decode(action.wire, action.wire_len, &ack));
 	zassert_equal(ack.uplink_sequence, 0u);
+}
 
-	zassert_ok(rb_data_encode(RB_FRAME_DOWNLINK_DATA, 9, 0, 4, 2, second,
-					 sizeof(second), data_wire, sizeof(data_wire), &len));
-	deliver(data_wire, len, 14000);
-	zassert_equal(rb_scheduler_slave_read_uart(&slave, uart, sizeof(uart)), 0);
-	zassert_ok(rb_data_encode(RB_FRAME_DOWNLINK_DATA, 9, 0, 4, 1, first,
-					 sizeof(first), data_wire, sizeof(data_wire), &len));
-	deliver(data_wire, len, 15000);
-	zassert_equal(rb_scheduler_slave_read_uart(&slave, uart, sizeof(uart)), 2);
-	zassert_equal(uart[0], 'a');
-	zassert_equal(uart[1], 'b');
-	deliver(data_wire, len, 16000);
-	zassert_equal(rb_scheduler_slave_read_uart(&slave, uart, sizeof(uart)), 0);
+ZTEST(slave_scheduler, test_downlink_gap_delivers_later_frame)
+{
+	const uint8_t payload[] = {'b'};
+	uint8_t wire[RB_ESB_MAX_PAYLOAD];
+	uint8_t uart;
+	size_t len;
+
+	init_slave();
+	activate_slave(4);
+	zassert_ok(rb_data_encode(RB_FRAME_DOWNLINK_DATA, 7, 0, 4, 2, payload,
+					 sizeof(payload), wire, sizeof(wire), &len));
+	deliver(wire, len, 14000);
+	zassert_equal(rb_scheduler_slave_read_uart(&slave, &uart, sizeof(uart)), 1);
+	zassert_equal(uart, 'b');
+	zassert_equal(slave.downlink_gap_count, 1u);
+}
+
+ZTEST(slave_scheduler, test_downlink_duplicate_is_not_delivered_twice)
+{
+	const uint8_t payload[] = {'a'};
+	uint8_t wire[RB_ESB_MAX_PAYLOAD];
+	uint8_t uart;
+	size_t len;
+
+	init_slave();
+	activate_slave(4);
+	zassert_ok(rb_data_encode(RB_FRAME_DOWNLINK_DATA, 7, 0, 4, 1, payload,
+					 sizeof(payload), wire, sizeof(wire), &len));
+	deliver(wire, len, 14000);
+	zassert_equal(rb_scheduler_slave_read_uart(&slave, &uart, sizeof(uart)), 1);
+	deliver(wire, len, 15000);
+	zassert_equal(rb_scheduler_slave_read_uart(&slave, &uart, sizeof(uart)), 0);
+	zassert_equal(slave.downlink_duplicate_count, 1u);
 }
 
 ZTEST(slave_scheduler, test_uplink_repeats_until_master_acknowledges_sequence)

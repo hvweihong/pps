@@ -501,10 +501,23 @@ static int runtime_execute_action(struct rb_scheduler_action *action)
 	case RB_ACTION_QUEUE_ACK:
 		return radio_transport_queue_ack(action->pipe, action->wire,
 						 action->wire_len);
-	case RB_ACTION_SEND_SYNC_DISCOVERY:
 	case RB_ACTION_SEND_DOWNLINK_BROADCAST:
-	case RB_ACTION_SEND_REPAIR:
-	case RB_ACTION_SEND_SKIP_TO:
+		if (scheduler.config.master &&
+		    current_profile != RB_RADIO_MASTER_PTX) {
+			ret = radio_transport_set_profile(RB_RADIO_MASTER_PTX, 0, NULL);
+			if (ret != 0) {
+				return ret;
+			}
+			current_profile = RB_RADIO_MASTER_PTX;
+		}
+		ret = radio_transport_send(action->pipe, true,
+					   action->wire, action->wire_len);
+		if (ret == 0) {
+			bridge_stats.radio_tx_packets++;
+			bridge_stats.broadcast_packets++;
+		}
+		return ret;
+	case RB_ACTION_SEND_SYNC_DISCOVERY:
 	case RB_ACTION_SEND_POLL:
 		if (scheduler.config.master &&
 		    current_profile != RB_RADIO_MASTER_PTX) {
@@ -559,12 +572,8 @@ static int runtime_execute_action(struct rb_scheduler_action *action)
 						 action->wire, action->wire_len);
 		if (ret == 0) {
 			bridge_stats.radio_tx_packets++;
-			if (action->type == RB_ACTION_SEND_DOWNLINK_BROADCAST) {
-				bridge_stats.broadcast_packets++;
-			} else if (action->type == RB_ACTION_SEND_POLL) {
+			if (action->type == RB_ACTION_SEND_POLL) {
 				bridge_stats.poll_packets++;
-			} else if (action->type == RB_ACTION_SEND_REPAIR) {
-				bridge_stats.repair_packets++;
 			}
 		}
 		return ret;
@@ -649,7 +658,6 @@ static void bridge_thread_fn(void *p1, void *p2, void *p3)
 		runtime_consume_validation_time();
 	#endif
 		for (;;) {
-			uint32_t evicted;
 			int action_ret;
 			int scheduler_ret;
 
@@ -670,9 +678,6 @@ static void bridge_thread_fn(void *p1, void *p2, void *p3)
 			if (scheduler_ret != 0 || action.type == RB_ACTION_NONE) {
 				break;
 			}
-			if (action.type == RB_ACTION_SEND_SKIP_TO) {
-				bridge_stats.unrecoverable_gap_count++;
-			}
 			radio_transport_retained_diag_note(
 				RB_RADIO_BOOT_STAGE_ACTION, (uint8_t)action.type, 0);
 			bridge_stats.last_action = (uint8_t)action.type;
@@ -690,12 +695,6 @@ static void bridge_thread_fn(void *p1, void *p2, void *p3)
 				(uint8_t)action.type, action_ret);
 			if (action_ret == -EBUSY) {
 				break;
-			}
-			/* After executing the action, check if the TX history window
-			 * evicted a slot to make room — that represents a packet that
-			 * could not be repaired before the window wrapped. */
-			while (rb_scheduler_take_evicted(&scheduler, &evicted)) {
-				bridge_stats.radio_history_drop_packets++;
 			}
 		}
 		runtime_push_uart_tx();
@@ -1015,6 +1014,10 @@ void bridge_runtime_stats_get(struct rb_bridge_stats *stats)
 	stats->suspect_count = rb_membership_suspect_count(&scheduler.membership);
 	stats->queue_drop_bytes = rb_scheduler_queue_drop_bytes(&scheduler);
 	stats->duplicate_packets = rb_scheduler_duplicate_count(&scheduler);
+	stats->downlink_gap_packets =
+		rb_scheduler_downlink_gap_count(&scheduler);
+	stats->downlink_duplicate_packets =
+		rb_scheduler_downlink_duplicate_count(&scheduler);
 	stats->invalid_session_packets = rb_scheduler_invalid_session_count(&scheduler);
 	stats->sync_state = (uint8_t)sync_filter_state(&sync_filter_runtime);
 	stats->sync_age_us = sync_filter_runtime.age_us;

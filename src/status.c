@@ -83,16 +83,15 @@ void status_log_bridge(void)
 		(unsigned long long)pps_input_drop_count());
 	LOG_INF("bridge_radio radio_tx_packets=%llu radio_rx_packets=%llu "
 		"radio_retry_count=%llu radio_retry_exhausted=%llu "
-		"broadcast_packets=%llu poll_packets=%llu repair_packets=%llu",
+		"broadcast_packets=%llu poll_packets=%llu",
 		(unsigned long long)bridge.radio_tx_packets,
 		(unsigned long long)bridge.radio_rx_packets,
 		(unsigned long long)bridge.radio_retry_count,
 		(unsigned long long)bridge.radio_retry_exhausted,
 		(unsigned long long)bridge.broadcast_packets,
-		(unsigned long long)bridge.poll_packets,
-		(unsigned long long)bridge.repair_packets);
+		(unsigned long long)bridge.poll_packets);
 	LOG_INF("bridge_link duplicate_packets=%llu invalid_session_packets=%llu "
-		"radio_history_drop_packets=%llu unrecoverable_gap_count=%llu "
+		"downlink_gap_packets=%llu downlink_duplicate_packets=%llu "
 		"queue_drop_bytes=%llu "
 		"active_count=%u suspect_count=%u slave_active=%u slave_node_id=%u "
 		"discovery_hello_count=%llu action_error_count=%llu "
@@ -100,8 +99,8 @@ void status_log_bridge(void)
 		"last_action_error_action=%u",
 		(unsigned long long)bridge.duplicate_packets,
 		(unsigned long long)bridge.invalid_session_packets,
-		(unsigned long long)bridge.radio_history_drop_packets,
-		(unsigned long long)bridge.unrecoverable_gap_count,
+		(unsigned long long)bridge.downlink_gap_packets,
+		(unsigned long long)bridge.downlink_duplicate_packets,
 		(unsigned long long)bridge.queue_drop_bytes,
 		bridge.active_count, bridge.suspect_count, bridge.slave_active,
 		bridge.slave_node_id,

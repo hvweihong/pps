@@ -163,17 +163,19 @@ ZTEST(master_scheduler, test_failed_assign_releases_reserved_membership)
 	zassert_equal(action.type, RB_ACTION_SEND_ASSIGN);
 }
 
-ZTEST(master_scheduler, test_failed_broadcast_retries_same_payload_after_backoff)
+ZTEST(master_scheduler, test_broadcast_has_no_ack_and_no_history)
 {
 	struct rb_scheduler_action action;
 	struct rb_data_frame frame;
 	const uint8_t payload[] = {0x12, 0x34, 0x56};
 
 	init_master();
+	zassert_ok(rb_scheduler_add_active_peer(&core, 1, 0x11, 1, 0));
 	zassert_equal(rb_scheduler_uart_write(&core, payload, sizeof(payload), 1u),
 		      sizeof(payload));
 	zassert_ok(rb_scheduler_next_action(&core, 1001u, &action));
 	zassert_equal(action.type, RB_ACTION_SEND_DOWNLINK_BROADCAST);
+	zassert_true(action.no_ack);
 	zassert_ok(rb_data_decode(action.wire, action.wire_len, &frame));
 	zassert_equal(frame.sequence, 1u);
 	zassert_mem_equal(frame.payload, payload, sizeof(payload));
@@ -181,10 +183,8 @@ ZTEST(master_scheduler, test_failed_broadcast_retries_same_payload_after_backoff
 	rb_scheduler_action_failed(&core, &action, 1001u);
 	zassert_equal(rb_scheduler_next_action(&core, 2000u, &action), -EAGAIN);
 	zassert_ok(rb_scheduler_next_action(&core, 2001u, &action));
-	zassert_equal(action.type, RB_ACTION_SEND_DOWNLINK_BROADCAST);
-	zassert_ok(rb_data_decode(action.wire, action.wire_len, &frame));
-	zassert_equal(frame.sequence, 1u);
-	zassert_mem_equal(frame.payload, payload, sizeof(payload));
+	zassert_equal(action.type, RB_ACTION_SEND_POLL);
+	zassert_false(action.no_ack);
 	zassert_equal(core.next_downlink_sequence, 2u);
 }
 
@@ -221,7 +221,7 @@ ZTEST(master_scheduler, test_broadcast_waits_for_radio_tx_completion)
 	zassert_equal(rb_scheduler_next_action(&core, 0, &action), -EAGAIN);
 }
 
-ZTEST(master_scheduler, test_broadcast_precedes_poll_and_repair)
+ZTEST(master_scheduler, test_broadcast_precedes_poll)
 {
 	struct rb_scheduler_action action;
 	const uint8_t payload[] = {0, 1, 2, 3};
@@ -503,7 +503,6 @@ ZTEST(master_scheduler, test_empty_ack_applies_idle_poll_backoff)
 	struct rb_ack_uplink ack = {
 		.common = RB_COMMON_INIT(RB_FRAME_ACK_UPLINK, 7, 1, 1),
 		.uplink_epoch = 1,
-		.downlink_epoch = 1,
 	};
 	uint8_t wire[RB_ESB_MAX_PAYLOAD];
 	size_t wire_len;
@@ -537,7 +536,6 @@ ZTEST(master_scheduler, test_uplink_payload_is_delivered_once_and_acknowledged)
 		.common = RB_COMMON_INIT(RB_FRAME_ACK_UPLINK, 7, 1, 1),
 		.uplink_epoch = 1,
 		.uplink_sequence = 1,
-		.downlink_epoch = 1,
 		.payload = payload,
 		.payload_len = sizeof(payload),
 	};
@@ -568,37 +566,34 @@ ZTEST(master_scheduler, test_uplink_payload_is_delivered_once_and_acknowledged)
 	zassert_equal(rb_scheduler_duplicate_count(&core), 1u);
 }
 
-ZTEST(master_scheduler, test_targeted_repair_once_then_skip_after_eviction)
+ZTEST(master_scheduler, test_broadcast_loss_does_not_schedule_repair)
 {
 	struct rb_scheduler_action action;
-	uint8_t payload = 0xa5;
+	struct rb_radio_event_view event = {
+		.type = RB_EVENT_VIEW_RX_RECEIVED,
+		.pipe = 1,
+	};
+	struct rb_ack_uplink ack = {
+		.common = RB_COMMON_INIT(RB_FRAME_ACK_UPLINK, 7, 1, 1),
+		.uplink_epoch = 1,
+	};
+	const uint8_t payload = 0xa5;
+	uint8_t wire[RB_ESB_MAX_PAYLOAD];
+	size_t wire_len;
 
 	init_master();
 	zassert_ok(rb_scheduler_add_active_peer(&core, 1, 0x11, 1, 0));
-	zassert_ok(rb_scheduler_add_active_peer(&core, 2, 0x22, 2, 0));
 	zassert_ok(rb_scheduler_queue_downlink(&core, &payload, 1));
 	zassert_ok(rb_scheduler_next_action(&core, 0, &action));
 	zassert_equal(action.type, RB_ACTION_SEND_DOWNLINK_BROADCAST);
 	complete_master_tx(0);
-	rb_scheduler_note_downlink_ack(&core, 2, 0, 0);
-	zassert_ok(rb_scheduler_next_action(&core, 1, &action));
-	zassert_equal(action.type, RB_ACTION_SEND_REPAIR);
-	zassert_equal(action.node_id, 2);
-	complete_master_tx(1);
-	zassert_ok(rb_scheduler_next_action(&core, 1, &action));
-	zassert_not_equal(action.type, RB_ACTION_SEND_REPAIR);
-	complete_master_tx(1);
-
-	for (uint32_t i = 0; i < RB_LINK_WINDOW_SIZE; i++) {
-		zassert_ok(rb_scheduler_queue_downlink(&core, &payload, 1));
-		zassert_ok(rb_scheduler_next_action(&core, 10 + i, &action));
-		zassert_equal(action.type, RB_ACTION_SEND_DOWNLINK_BROADCAST);
-		complete_master_tx(10 + i);
-	}
-	rb_scheduler_note_downlink_ack(&core, 2, 0, 0);
-	zassert_ok(rb_scheduler_next_action(&core, 100, &action));
-	zassert_equal(action.type, RB_ACTION_SEND_SKIP_TO);
-	zassert_equal(action.node_id, 2);
+	zassert_ok(rb_ack_uplink_encode(&ack, wire, sizeof(wire), &wire_len));
+	event.wire = wire;
+	event.wire_len = wire_len;
+	rb_scheduler_on_radio_event(&core, &event, 1);
+	zassert_equal(rb_scheduler_next_action(&core, 2000, &action), -EAGAIN);
+	zassert_ok(rb_scheduler_next_action(&core, 2001, &action));
+	zassert_equal(action.type, RB_ACTION_SEND_POLL);
 }
 
 ZTEST(master_scheduler, test_slave_hello_preserves_sync_session_and_nonce)
