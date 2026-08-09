@@ -2,19 +2,19 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NCS_WORKSPACE="${NCS_WORKSPACE:-/home/hv/ncs}"
+USER_HOME="${HOME:?HOME is not set}"
+NCS_WORKSPACE="${NCS_WORKSPACE:-${USER_HOME}/ncs}"
 ZEPHYR_WORKSPACE="${ZEPHYR_WORKSPACE:-${NCS_WORKSPACE}}"
 ZEPHYR_BASE="${ZEPHYR_BASE:-${ZEPHYR_WORKSPACE}/zephyr}"
 ZEPHYR_VENV="${ZEPHYR_VENV:-${ZEPHYR_WORKSPACE}/.venv}"
-if [[ ! -x "${ZEPHYR_VENV}/bin/west" && -x "/home/hv/zephyrproject/.venv312/bin/west" ]]; then
-	ZEPHYR_VENV="/home/hv/zephyrproject/.venv312"
+if [[ ! -x "${ZEPHYR_VENV}/bin/west" && -x "${USER_HOME}/zephyrproject/.venv312/bin/west" ]]; then
+	ZEPHYR_VENV="${USER_HOME}/zephyrproject/.venv312"
 fi
-ZEPHYR_SDK_INSTALL_DIR="${ZEPHYR_SDK_INSTALL_DIR:-/home/hv/zephyr-sdk-0.17.4}"
+ZEPHYR_SDK_INSTALL_DIR="${ZEPHYR_SDK_INSTALL_DIR:-${USER_HOME}/zephyr-sdk-0.17.4}"
 BOARD="${BOARD:-xiao_ble/nrf52840}"
 BUILD_DIR="${BUILD_DIR:-}"
 PRISTINE="always"
-MODE="slave"
-EXTRA_CONF=()
+MODE="unified"
 
 usage() {
 	cat <<EOF
@@ -22,7 +22,7 @@ Usage: $(basename "$0") [master|slave] [options] [-- extra west build args]
 
 Options:
   -b, --board BOARD        Zephyr board target. Default: ${BOARD}
-  -d, --build-dir DIR      Build output directory. Default: build/<mode>
+  -d, --build-dir DIR      Build output directory. Default: build/<role>
       --no-pristine        Reuse the existing build directory.
   -h, --help              Show this help.
 
@@ -34,6 +34,9 @@ Environment overrides:
   ZEPHYR_SDK_INSTALL_DIR   Default: ${ZEPHYR_SDK_INSTALL_DIR}
   BOARD                    Default: ${BOARD}
   BUILD_DIR                Default: ${BUILD_DIR}
+
+Note: This firmware builds a unified image. Role (master/slave) is configured
+      at runtime via NVS and CDC shell command 'param set role_id 0|1|2|3'.
 EOF
 }
 
@@ -84,15 +87,20 @@ fi
 
 if [[ ! -d "${ZEPHYR_BASE}" ]]; then
 	echo "error: ZEPHYR_BASE does not exist: ${ZEPHYR_BASE}" >&2
-	echo "This app now builds against nRF Connect SDK because it uses MPSL." >&2
+	echo "This app builds against nRF Connect SDK because it uses Nordic ESB and ECB." >&2
 	echo "Set NCS_WORKSPACE or ZEPHYR_WORKSPACE to a synced NCS workspace." >&2
 	exit 1
 fi
 
-if [[ ! -f "${ZEPHYR_WORKSPACE}/nrfxlib/mpsl/include/mpsl_timeslot.h" ]]; then
-	echo "error: MPSL headers not found in ${ZEPHYR_WORKSPACE}/nrfxlib" >&2
+if [[ ! -f "${ZEPHYR_WORKSPACE}/nrf/include/esb.h" ]]; then
+	echo "error: ESB headers not found in ${ZEPHYR_WORKSPACE}/nrf/include" >&2
 	echo "Run: west init -m https://github.com/nrfconnect/sdk-nrf --mr v3.3.1 ${NCS_WORKSPACE}" >&2
 	echo "Then: (cd ${NCS_WORKSPACE} && west update)" >&2
+	exit 1
+fi
+
+if [[ ! -f "${ZEPHYR_BASE}/drivers/crypto/crypto_nrf_ecb.c" ]]; then
+	echo "error: nRF ECB driver not found in ${ZEPHYR_BASE}/drivers/crypto" >&2
 	exit 1
 fi
 
@@ -106,26 +114,31 @@ export ZEPHYR_BASE
 export ZEPHYR_SDK_INSTALL_DIR
 
 case "${MODE}" in
-	master)
-		BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build/master}"
-		EXTRA_CONF=(-DEXTRA_CONF_FILE="${APP_DIR}/master.conf")
-		;;
-	slave)
-		BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build/slave}"
-		EXTRA_CONF=(-DEXTRA_CONF_FILE="${APP_DIR}/slave.conf")
-		;;
+	master) BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build/master}" ;;
+	slave) BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build/slave}" ;;
+	*) BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build}" ;;
 esac
 
 echo "Building ${APP_DIR}"
-echo "Mode: ${MODE}"
+echo "Mode: ${MODE} (runtime role via NVS)"
 echo "Board: ${BOARD}"
 echo "Build dir: ${BUILD_DIR}"
 
-exec "${WEST}" build \
+"${WEST}" build \
 	--no-sysbuild \
 	-p "${PRISTINE}" \
 	-b "${BOARD}" \
 	"${APP_DIR}" \
 	-d "${BUILD_DIR}" \
-	"${EXTRA_CONF[@]}" \
 	"$@"
+
+ELF="${BUILD_DIR}/zephyr/zephyr.elf"
+HEX="${BUILD_DIR}/zephyr/zephyr.hex"
+UF2="${BUILD_DIR}/zephyr/zephyr.uf2"
+[[ -f "${ELF}" && -f "${HEX}" && -f "${UF2}" ]] || {
+	echo "error: expected build artifacts are missing" >&2
+	exit 1
+}
+echo "ELF: ${ELF}"
+echo "HEX: ${HEX}"
+echo "UF2: ${UF2}"

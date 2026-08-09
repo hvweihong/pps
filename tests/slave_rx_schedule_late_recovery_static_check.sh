@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if rg -q '^CONFIG_RADIO_BRIDGE_NEW_STACK=y$' prj.conf; then
+	echo "SKIP: tests/slave_rx_schedule_late_recovery_static_check.sh covers the retired BLE/MPSL application"
+	exit 0
+fi
+
 python3 - <<'PY'
 from pathlib import Path
 import re

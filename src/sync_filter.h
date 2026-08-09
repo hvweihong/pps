@@ -40,7 +40,8 @@ struct sync_filter {
 
 struct sync_filter_config sync_filter_default_config(void);
 void sync_filter_init(struct sync_filter *filter,
-		      const struct sync_filter_config *cfg);
+			      const struct sync_filter_config *cfg);
+void sync_filter_reset(struct sync_filter *filter);
 int sync_filter_update(struct sync_filter *filter,
 		       const struct sync_observation *obs);
 void sync_filter_note_missed(struct sync_filter *filter, uint32_t missed_count);

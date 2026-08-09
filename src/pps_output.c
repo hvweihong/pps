@@ -297,14 +297,14 @@ int pps_output_schedule(uint64_t rise_tick)
 		return -EACCES;
 	}
 
+	if (phase_reset_pending && pending_phase_tick == rise_tick) {
+		return 0;
+	}
+
 	now = timebase_now_us();
 	if (rise_tick <= now + PPS_MIN_ARM_AHEAD_US) {
 		stats.late_schedules++;
 		return -ETIME;
-	}
-
-	if (phase_reset_pending && pending_phase_tick == rise_tick) {
-		return 0;
 	}
 
 	if (!phase_reset_initialized) {

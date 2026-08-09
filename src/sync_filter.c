@@ -40,7 +40,7 @@ struct sync_filter_config sync_filter_default_config(void)
 }
 
 void sync_filter_init(struct sync_filter *filter,
-		      const struct sync_filter_config *cfg)
+			      const struct sync_filter_config *cfg)
 {
 	if (filter == NULL) {
 		return;
@@ -61,6 +61,17 @@ void sync_filter_init(struct sync_filter *filter,
 	filter->last_master_tick = 0;
 	filter->last_local_tick = 0;
 	filter->next_pps_master_tick = 0;
+}
+
+void sync_filter_reset(struct sync_filter *filter)
+{
+	struct sync_filter_config config;
+
+	if (filter == NULL) {
+		return;
+	}
+	config = filter->cfg;
+	sync_filter_init(filter, &config);
 }
 
 int sync_filter_update(struct sync_filter *filter,

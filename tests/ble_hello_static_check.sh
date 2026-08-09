@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if rg -q '^CONFIG_RADIO_BRIDGE_NEW_STACK=y$' prj.conf; then
+	echo "SKIP: tests/ble_hello_static_check.sh covers the retired BLE/MPSL application"
+	exit 0
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 rg -q "HELLO_FROM_MASTER hello world" "$repo_root/src/ble_time_sync_client.c"

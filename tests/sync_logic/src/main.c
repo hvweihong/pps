@@ -208,6 +208,38 @@ ZTEST(sync_filter, test_filter_converts_master_pps_to_local_tick)
 	zassert_equal(local_pps, 1000500);
 }
 
+ZTEST(sync_filter, test_filter_reset_preserves_config_and_clears_lock)
+{
+	struct sync_filter filter;
+	struct sync_filter_config cfg = sync_filter_default_config();
+	struct sync_observation obs = {
+		.master_tick = 100000,
+		.local_tick = 100500,
+		.next_pps_master_tick = 1000000,
+	};
+	uint64_t local_pps;
+
+	cfg.lock_beacons = 2;
+	cfg.outlier_threshold_us = 321;
+	sync_filter_init(&filter, &cfg);
+	for (int i = 0; i < cfg.lock_beacons; i++) {
+		obs.master_tick += cfg.sync_interval_us;
+		obs.local_tick += cfg.sync_interval_us;
+		zassert_ok(sync_filter_update(&filter, &obs));
+	}
+	zassert_equal(sync_filter_state(&filter), SYNC_FILTER_LOCKED);
+
+	sync_filter_reset(&filter);
+
+	zassert_equal(sync_filter_state(&filter), SYNC_FILTER_UNLOCKED);
+	zassert_equal(sync_filter_offset_us(&filter), 0);
+	zassert_equal(sync_filter_drift_ppm(&filter), 0);
+	zassert_equal(filter.cfg.lock_beacons, 2);
+	zassert_equal(filter.cfg.outlier_threshold_us, 321);
+	zassert_equal(sync_filter_master_to_local(&filter, 1000000, &local_pps),
+		      -EAGAIN);
+}
+
 ZTEST(heartbeat_led, test_default_heartbeat_period_is_one_second)
 {
 	zassert_equal(HEARTBEAT_LED_DEFAULT_PERIOD_MS, 1000);

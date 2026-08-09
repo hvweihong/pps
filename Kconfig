@@ -1,146 +1,112 @@
 source "Kconfig.zephyr"
 
-menu "Wireless time synchronization"
+config RADIO_BRIDGE_VALIDATION_STAGE
+	int "Incremental board validation stage"
+	default 8
+	range 0 8
 
-choice TIME_SYNC_ROLE
-	prompt "Time sync role"
-	default TIME_SYNC_ROLE_SLAVE
+menu "Star radio UART bridge"
 
-config TIME_SYNC_ROLE_MASTER
-	bool "Master"
+config RADIO_BRIDGE_NEW_STACK
+	bool "Use star radio UART bridge stack"
+	default y
 
-config TIME_SYNC_ROLE_SLAVE
-	bool "Slave"
+config RADIO_BRIDGE_GROUP_ID
+	int "Group identifier"
+	default 1
+	range 1 4294967294
 
-endchoice
+config RADIO_BRIDGE_GROUP_KEY
+	string "Group AES-128 key (32 hexadecimal characters)"
+	default "00112233445566778899aabbccddeeff"
 
-config TIME_SYNC_NETWORK_ID
-	hex "Private sync network ID"
-	default 0x54534e52
+config RADIO_BRIDGE_UART_BAUDRATE
+	int "Data UART baud rate"
+	default 115200
+	range 1200 3000000
 
-config TIME_SYNC_RF_CHANNEL
-	int "Raw RADIO frequency offset from 2400 MHz"
-	default 40
-	range 0 100
+config RADIO_BRIDGE_UART_RING_SIZE
+	int "Bytes in each data UART ring"
+	default 16384
+	range 1024 32768
 
-config TIME_SYNC_INTERVAL_US
-	int "Sync beacon interval in microseconds"
+config RADIO_BRIDGE_AGGREGATION_TIMEOUT_US
+	int "Partial radio payload aggregation timeout"
+	default 1000
+	range 100 10000
+
+config RADIO_BRIDGE_SYNC_INTERVAL_US
+	int "Wireless sync/discovery interval"
 	default 100000
 
+config RADIO_BRIDGE_MAX_SLAVES
+	int "Maximum active slaves"
+	default 3
+	range 3 3
+
+config RADIO_BRIDGE_RESPONSE_SLOT_COUNT
+	int "Discovery response slots"
+	default 8
+	range 1 32
+
+config RADIO_BRIDGE_RESPONSE_SLOT_US
+	int "Discovery response slot width"
+	default 500
+	range 100 5000
+
+config RADIO_BRIDGE_ASSIGNMENT_WINDOW_US
+	int "Assignment receive window"
+	default 6000
+
+config RADIO_BRIDGE_LEASE_TIMEOUT_US
+	int "Lease timeout without a valid poll"
+	default 100000
+
+config RADIO_BRIDGE_IDLE_POLL_MAX_US
+	int "Maximum idle poll interval"
+	default 5000
+	range 1000 5000
+
 config TIME_SYNC_PPS_PERIOD_US
-	int "PPS period in microseconds"
+	int "PPS period"
 	default 1000000
 
 config TIME_SYNC_PPS_WIDTH_US
-	int "PPS pulse width in microseconds"
+	int "PPS pulse width"
 	default 100
 
 config TIME_SYNC_RADIO_DELAY_US
-	int "Calibrated residual radio reference delay in microseconds"
+	int "Calibrated slave radio delay"
 	default 0
 
-config TIME_SYNC_RADIO_TXEN_TO_ADDRESS_US
-	int "Master TXEN to RADIO ADDRESS reference delay in microseconds"
-	default 88
-
-config TIME_SYNC_MASTER_TX_TIMESLOT_LENGTH_US
-	int "Master RADIO TX timeslot length in microseconds"
-	default 3000
-	range 1000 25000
-	depends on TIME_SYNC_ROLE_MASTER
-
-config TIME_SYNC_MASTER_TX_START_OFFSET_US
-	int "Master RADIO TXEN offset from granted timeslot start"
-	default 500
-	range 200 20000
-	depends on TIME_SYNC_ROLE_MASTER
-
-config TIME_SYNC_BLE
-	bool "Enable Bluetooth control channel"
-	default y
-
-config TIME_SYNC_BLE_DEVICE_NAME_PREFIX
-	string "Bluetooth device name prefix"
-	default "TS"
-	depends on TIME_SYNC_BLE
-
-config TIME_SYNC_MASTER_BLE_AUTO_START
-	bool "Automatically start master BLE scanning after RADIO TX is stable"
-	default n
-	depends on TIME_SYNC_BLE && TIME_SYNC_ROLE_MASTER
-
-config TIME_SYNC_TIMESLOT_LENGTH_US
-	int "MPSL raw RADIO timeslot length in microseconds"
-	default 25000 if TIME_SYNC_ROLE_MASTER
-	default 100000 if TIME_SYNC_ROLE_SLAVE
-	range 100 100000
-
-config TIME_SYNC_TIMESLOT_END_MARGIN_US
-	int "Margin before MPSL timeslot end used to stop raw RADIO"
-	default 250
-	range 100 10000
-
-config TIME_SYNC_RX_START_OFFSET_US
-	int "Slave RXEN offset from granted timeslot start"
-	default 1000
-	range 200 20000
-
-config TIME_SYNC_TIMESLOT_REQUEST_TIMEOUT_US
-	int "Timeout for earliest MPSL timeslot requests"
-	default 200000
-	range 1000 256000000
-
-config TIME_SYNC_RX_ACQUIRE_WINDOW_US
-	int "Slave acquire RX window length in microseconds"
-	default 100000
-	range 1000 100000
-
-config TIME_SYNC_RX_ACQUIRE_PERIOD_US
-	int "Slave acquire RX gap in microseconds"
-	default 2000
-	range 1000 1000000
-
-config TIME_SYNC_RX_LOCKED_PRE_MARGIN_US
-	int "Slave locked RX pre-margin before predicted beacon"
-	default 1500
-	range 100 20000
-
-config TIME_SYNC_RX_LOCKED_POST_MARGIN_US
-	int "Slave locked RX post-margin after predicted beacon"
-	default 2500
-	range 100 20000
-
-config TIME_SYNC_RX_RECOVERY_PRE_MARGIN_US
-	int "Slave recovery RX pre-margin before predicted beacon"
-	default 10000
-	range 1000 50000
-
-config TIME_SYNC_RX_RECOVERY_POST_MARGIN_US
-	int "Slave recovery RX post-margin after predicted beacon"
-	default 10000
-	range 1000 50000
-
-config TIME_SYNC_RX_WINDOW_GUARD_US
-	int "Slave RX window guard time in microseconds"
-	default 300
-	range 0 5000
-
-config TIME_SYNC_RX_MISSED_TO_ACQUIRE
-	int "Missed locked windows before returning to acquire mode"
-	default 3
-	range 1 20
-
 config TIME_SYNC_STATUS_INTERVAL_MS
-	int "Status log interval in milliseconds"
+	int "Status log interval"
 	default 1000
 
 config TIME_SYNC_LED_HEARTBEAT
-	bool "Blink board LED as a runtime heartbeat"
+	bool "Blink board LED"
 	default y
 
 config TIME_SYNC_LED_HEARTBEAT_PERIOD_MS
-	int "LED heartbeat toggle period in milliseconds"
+	int "LED period"
 	default 1000
 	depends on TIME_SYNC_LED_HEARTBEAT
+
+config RADIO_BRIDGE_TEST_LOSS_INJECTION
+	bool "Enable radio packet loss injection for testing"
+	default n
+	depends on RADIO_BRIDGE_NEW_STACK
+	help
+	  When enabled, selected frame types can be dropped before transmission
+	  or before queueing received frames.  Never enable in production role
+	  configs (master.conf / slave.conf).
+
+config RADIO_BRIDGE_VALIDATION_CDC
+	bool "Enable CDC bridge payload validation commands"
+	default n
+	depends on RADIO_BRIDGE_NEW_STACK && SHELL
+	help
+	  Adds validation-only pattern injection and verification at the physical
+	  UART/scheduler boundary. Keep disabled in production firmware.
 
 endmenu

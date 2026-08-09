@@ -8,6 +8,7 @@
 
 / {
 	aliases {
+		bridge-uart = &uart0;
 		pps-out = &pps_out;
 		debug-out = &debug_out;
 		pps-in = &pps_in;
