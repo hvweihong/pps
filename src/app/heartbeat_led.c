@@ -78,7 +78,6 @@ int heartbeat_led_start(bool enabled, uint32_t period_ms)
 			K_THREAD_STACK_SIZEOF(heartbeat_stack),
 			heartbeat_thread_fn, NULL, NULL, NULL,
 			HEARTBEAT_PRIORITY, 0, K_NO_WAIT);
-	k_thread_name_set(&heartbeat_thread, "heartbeat_led");
 	started = true;
 
 	LOG_INF("heartbeat LED enabled=%u period=%ums", enabled, period_ms);

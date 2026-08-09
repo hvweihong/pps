@@ -11,7 +11,6 @@
 		bridge-uart = &uart0;
 		time-uart = &uart1;
 		pps-out = &pps_out;
-		debug-out = &debug_out;
 		pps-in = &pps_in;
 	};
 
@@ -21,11 +20,6 @@
 		pps_out: pps_out {
 			gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
 			label = "PPS output";
-		};
-
-		debug_out: debug_out {
-			gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
-			label = "Debug timing output";
 		};
 
 		pps_in: pps_in {
