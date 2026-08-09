@@ -285,6 +285,20 @@ ZTEST(master_scheduler, test_uart_aggregation_queue_drops_oldest_bytes)
 	zassert_equal(core.uart_count, RB_SCHEDULER_UART_QUEUE_SIZE);
 }
 
+ZTEST(master_scheduler, test_uart_available_reports_non_evicting_capacity)
+{
+	const uint8_t payload[] = {1u, 2u, 3u};
+
+	init_master();
+	zassert_equal(rb_scheduler_uart_available(&core),
+		      RB_SCHEDULER_UART_QUEUE_SIZE);
+	zassert_equal(rb_scheduler_uart_write(&core, payload, sizeof(payload), 1u),
+		      sizeof(payload));
+	zassert_equal(rb_scheduler_uart_available(&core),
+		      RB_SCHEDULER_UART_QUEUE_SIZE - sizeof(payload));
+	zassert_equal(rb_scheduler_uart_available(NULL), 0u);
+}
+
 ZTEST(master_scheduler, test_assign_waits_for_full_response_window)
 {
 	struct rb_scheduler_action action;

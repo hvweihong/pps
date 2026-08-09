@@ -56,8 +56,15 @@ size_t rb_validation_capture_output(struct rb_validation_pipe *pipe,
 				    const uint8_t *data, size_t len)
 {
 	size_t captured;
+	size_t available;
 
-	if (pipe == NULL) {
+	if (pipe == NULL || data == NULL || len == 0u ||
+	    pipe->output.storage == NULL || pipe->output.capacity == 0u) {
+		return 0u;
+	}
+	available = pipe->output.capacity - rb_byte_ring_size(&pipe->output);
+	if (len > available) {
+		pipe->output.dropped_bytes += len;
 		return 0u;
 	}
 	captured = rb_byte_ring_write(&pipe->output, data, len);
@@ -92,6 +99,12 @@ int rb_validation_verify_output(struct rb_validation_pipe *pipe, size_t len,
 {
 	if (pipe == NULL || len == 0u) {
 		return -EINVAL;
+	}
+	if (pipe->output.dropped_bytes != 0u) {
+		if (mismatch_offset != NULL) {
+			*mismatch_offset = 0u;
+		}
+		return -EOVERFLOW;
 	}
 	if (rb_byte_ring_size(&pipe->output) < len) {
 		return -EAGAIN;

@@ -208,18 +208,25 @@ static void runtime_pull_uart_rx(void)
 static void runtime_pull_validation_rx(void)
 {
 	uint8_t data[256];
-	size_t len;
 
-	do {
+	for (;;) {
+		size_t available = rb_scheduler_uart_available(&scheduler);
+		size_t max_len = available < sizeof(data) ? available : sizeof(data);
+		size_t len;
+
+		if (max_len == 0u) {
+			return;
+		}
 		k_spinlock_key_t key = k_spin_lock(&validation_lock);
 
-		len = rb_validation_pull_input(&validation_pipe, data, sizeof(data));
+		len = rb_validation_pull_input(&validation_pipe, data, max_len);
 		k_spin_unlock(&validation_lock, key);
-		if (len != 0u) {
-			(void)rb_scheduler_uart_write(&scheduler, data, len,
-						      timebase_now_us());
+		if (len == 0u) {
+			return;
 		}
-	} while (len == sizeof(data));
+		(void)rb_scheduler_uart_write(&scheduler, data, len,
+					      timebase_now_us());
+	}
 }
 #endif
 

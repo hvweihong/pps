@@ -827,6 +827,17 @@ size_t rb_scheduler_uart_write(struct rb_scheduler_core *core,
 	return accepted;
 }
 
+size_t rb_scheduler_uart_available(const struct rb_scheduler_core *core)
+{
+	size_t queued;
+
+	if (core == NULL) {
+		return 0u;
+	}
+	queued = core->config.master ? core->uart_count : core->slave_uplink_count;
+	return RB_SCHEDULER_UART_QUEUE_SIZE - queued;
+}
+
 int rb_scheduler_next_action(struct rb_scheduler_core *core, uint64_t now_us,
 			     struct rb_scheduler_action *action)
 {

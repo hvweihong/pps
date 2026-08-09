@@ -67,6 +67,12 @@ static int cmd_bridge_test_verify(const struct shell *shell, size_t argc,
 			    len, stats.output_bytes);
 		return ret;
 	}
+	if (ret == -EOVERFLOW) {
+		bridge_runtime_validation_stats_get(&stats);
+		shell_error(shell, "bridge_test verify overflow dropped=%llu",
+			    (unsigned long long)stats.output_drop_bytes);
+		return ret;
+	}
 	if (ret != 0) {
 		shell_error(shell, "bridge_test verify failed err=%d offset=%zu",
 			    ret, mismatch);

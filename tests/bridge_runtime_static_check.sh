@@ -10,6 +10,7 @@ grep -q 'radio_transport_get_event' "${FILE}"
 grep -q 'uart_bridge_read' "${FILE}"
 grep -q 'uart_bridge_write' "${FILE}"
 grep -q 'rb_scheduler_next_action' "${FILE}"
+grep -q 'rb_scheduler_uart_available' "${FILE}"
 for token in sync_pair_count sync_tracker_wait_count sync_tracker_error_count \
              sync_filter_update_count sync_filter_error_count \
              sync_tx_build_count sync_tx_capture_count sync_tx_failure_count \

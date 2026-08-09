@@ -175,6 +175,7 @@ int rb_scheduler_queue_downlink(struct rb_scheduler_core *core,
 				const uint8_t *data, size_t len);
 size_t rb_scheduler_uart_write(struct rb_scheduler_core *core,
 			       const uint8_t *data, size_t len, uint64_t now_us);
+size_t rb_scheduler_uart_available(const struct rb_scheduler_core *core);
 int rb_scheduler_next_action(struct rb_scheduler_core *core, uint64_t now_us,
 			     struct rb_scheduler_action *action);
 void rb_scheduler_action_failed(struct rb_scheduler_core *core,

@@ -335,4 +335,17 @@ ZTEST(slave_scheduler, test_uplink_splits_at_ack_payload_capacity)
 			  ack.payload_len);
 }
 
+ZTEST(slave_scheduler, test_uart_available_tracks_uplink_queue_capacity)
+{
+	const uint8_t payload[] = {1u, 2u, 3u, 4u};
+
+	init_slave();
+	zassert_equal(rb_scheduler_uart_available(&slave),
+		      RB_SCHEDULER_UART_QUEUE_SIZE);
+	zassert_equal(rb_scheduler_uart_write(&slave, payload, sizeof(payload), 1u),
+		      sizeof(payload));
+	zassert_equal(rb_scheduler_uart_available(&slave),
+		      RB_SCHEDULER_UART_QUEUE_SIZE - sizeof(payload));
+}
+
 ZTEST_SUITE(slave_scheduler, NULL, NULL, NULL, NULL, NULL);
