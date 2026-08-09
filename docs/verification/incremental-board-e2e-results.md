@@ -128,7 +128,7 @@
   /home/hv/ncs/.venv/bin/python -m unittest -v tests/test_flash_uf2.py
   ```
 
-  最终分别为 26/26 和 11/11 tests PASS。timeout 单测证明只恢复一次、只对 affected
+  最终分别为 27/27 和 11/11 tests PASS。timeout 单测证明只恢复一次、只对 affected
   board 执行一次 flash attempt、再重试命令一次；第二次 timeout 保留 receive tail
   并抛错，不会无限循环。runtime drop tests 覆盖三字段全零、任一字段非零和任一字段缺失，
   并验证只接受 bridge traffic 之后的新 status sample。额外覆盖 recovery 后 reflash、CDC
@@ -199,22 +199,24 @@
 
 - pristine build PASS；`CONFIG_RADIO_BRIDGE_VALIDATION_CDC=y`，FLASH `169440 B`，
   RAM `188340 B`，UF2 `338944 B`。构建定义中的固件身份为
-  `APP_GIT_VERSION="21749cf37329-dirty"`；UF2 SHA-256 为
+  `APP_GIT_VERSION="de3eef248e8a-dirty"`；UF2 SHA-256 为
   `f50a5fa4ade1e7fc3de225b862386bbd5e2c6d4df993bef88d76091546cae395`。
 - bridge native suite 93/93、sync native suite 15/15 均 PASS；静态检查 13 PASS、
-  15 intentional SKIP、0 FAIL；Python gate/UF2 suite 分别 26/26 和 11/11 PASS，
+  15 intentional SKIP、0 FAIL；Python gate/UF2 suite 分别 27/27 和 11/11 PASS，
   `ruff` 与 `git diff --check` PASS。
 - `findmnt`、`lsblk` 和 `udisksctl` 共用的 host subprocess 入口现在强制 10 s timeout，
   `TimeoutExpired` 转换为 `FlashError`，因此 mount/discovery 命令不能永久挂起。CLI
   bridge length 上限从 4096 对齐 firmware
   `RB_VALIDATION_BUFFER_SIZE=2048`，`2049` fail-closed 回归测试通过。
 - review 后固定 ID gate 仍使用上面的权威命令和固定 `600` byte 长度；原始 evidence 位于
-  `build/board-e2e/20260809T044822.424582Z-stage1-baseline/`。
+  `build/board-e2e/20260809T045917.332837Z-stage1-baseline/`。
 - master 和 slave 均在 flash attempt 1/2 成功；flash retry 和 command-timeout recovery
   计数均为 0。role 分别为 persisted `role_id=0` 和 `role_id=1`；role 检查后的首次
-  `kernel uptime` 分别为 `8356 ms` 和 `3811 ms`。
+  `kernel uptime` 分别为 `8333 ms` 和 `3786 ms`。
 - 本轮 readiness 要求同一次轮询中的当前 master `active_count=1` 与当前 slave
-  `sync_state=2`/`LOCKED` 配对成立，不能由历史状态粘滞满足。
+  `sync_state=2`/`LOCKED` 配对成立，且只采用各 fresh suffix 中最后一个 readiness 值，
+  不能由历史状态或同一 suffix 内较早的 ready 值粘滞满足。ready 后紧跟 not-ready 的
+  冲突样本回归测试通过。
 - master → slave 的 `len=600 seed=49` 和 slave → master 的 `len=600 seed=114` 均
   exact verify PASS；两板 `bridge_test stats` 均为 `input_drop=0 output_drop=0`。
 - bridge traffic 后等待新的周期 status：master 在 firmware uptime `10.037 s`、slave 在

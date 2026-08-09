@@ -176,6 +176,28 @@ class ShellOutputTests(unittest.TestCase):
             )
         )
 
+    def test_readiness_uses_latest_values_in_fresh_samples(self):
+        board_e2e = load_board_e2e()
+        current_pair_ready = require_symbol(board_e2e, "_current_pair_ready")
+        self.assertFalse(
+            current_pair_ready(
+                "active_count=1\nactive_count=0",
+                "State:           LOCKED",
+            )
+        )
+        self.assertFalse(
+            current_pair_ready(
+                "active_count=1",
+                "sync_state=2\nsync_state=0",
+            )
+        )
+        self.assertFalse(
+            current_pair_ready(
+                "active_count=1",
+                "State:           LOCKED\nState:           ACQUIRING",
+            )
+        )
+
     def test_command_completion_ignores_log_redraw_prompt_before_echo(self):
         board_e2e = load_board_e2e()
         complete = require_symbol(board_e2e, "_command_response_complete")

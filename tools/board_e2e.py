@@ -128,14 +128,21 @@ def _require_zero_drops(output: str, board: str) -> None:
 
 
 def _master_ready(output: str) -> bool:
-    return re.search(r"\bactive_count=1\b", output) is not None
+    matches = re.findall(r"\bactive_count=(\d+)\b", output)
+    return bool(matches) and int(matches[-1]) == 1
 
 
 def _slave_ready(output: str) -> bool:
-    return (
-        re.search(r"\bsync_state=2\b", output) is not None
-        or re.search(r"\bState:\s+LOCKED\b", output) is not None
+    matches = list(
+        re.finditer(
+            r"\bsync_state=(\d+)\b|\bState:\s+([A-Za-z]+)\b",
+            output,
+        )
     )
+    if not matches:
+        return False
+    latest = matches[-1]
+    return latest.group(1) == "2" if latest.group(1) is not None else latest.group(2) == "LOCKED"
 
 
 def _current_pair_ready(master_output: str, slave_output: str) -> bool:
