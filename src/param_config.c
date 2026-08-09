@@ -33,9 +33,9 @@ struct param_cache_entry {
 
 static struct param_cache_entry param_cache[RB_PARAM_COUNT];
 static bool initialized;
+static bool persistence_available;
 
-/* Spinlock for atomic NVS updates */
-static struct k_spinlock param_lock;
+K_MUTEX_DEFINE(param_mutex);
 
 /* Parameter table definition */
 const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
@@ -59,7 +59,7 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.config.u32 = {
 			.min = 1200,
 			.max = 3000000,
-			.default_value = 921600,
+			.default_value = CONFIG_RADIO_BRIDGE_UART_BAUDRATE,
 		},
 		.nvs_id = 0x1000,
 	},
@@ -69,9 +69,9 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.type = RB_PARAM_UINT32,
 		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
-			.min = 1024,
-			.max = 32768,
-			.default_value = 16384,
+			.min = CONFIG_RADIO_BRIDGE_UART_RING_SIZE,
+			.max = CONFIG_RADIO_BRIDGE_UART_RING_SIZE,
+			.default_value = CONFIG_RADIO_BRIDGE_UART_RING_SIZE,
 		},
 		.nvs_id = 0x1001,
 	},
@@ -79,11 +79,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "aggregation_timeout_us",
 		.description = "Partial radio payload aggregation timeout",
 		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
 			.min = 100,
 			.max = 10000,
-			.default_value = 2000,
+			.default_value = CONFIG_RADIO_BRIDGE_AGGREGATION_TIMEOUT_US,
 		},
 		.nvs_id = 0x1002,
 	},
@@ -91,11 +91,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "sync_interval_us",
 		.description = "Wireless sync/discovery interval",
 		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
 			.min = 10000,
 			.max = 1000000,
-			.default_value = 30000,
+			.default_value = CONFIG_RADIO_BRIDGE_SYNC_INTERVAL_US,
 		},
 		.nvs_id = 0x1003,
 	},
@@ -103,11 +103,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "response_slot_count",
 		.description = "Discovery response slots",
 		.type = RB_PARAM_UINT8,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u8 = {
 			.min = 1,
 			.max = 32,
-			.default_value = 4,
+			.default_value = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_COUNT,
 		},
 		.nvs_id = 0x1004,
 	},
@@ -115,11 +115,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "response_slot_us",
 		.description = "Discovery response slot width",
 		.type = RB_PARAM_UINT16,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u16 = {
 			.min = 100,
 			.max = 5000,
-			.default_value = 500,
+			.default_value = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_US,
 		},
 		.nvs_id = 0x1005,
 	},
@@ -127,11 +127,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "assignment_window_us",
 		.description = "Assignment receive window",
 		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
 			.min = 1000,
 			.max = 50000,
-			.default_value = 10000,
+			.default_value = CONFIG_RADIO_BRIDGE_ASSIGNMENT_WINDOW_US,
 		},
 		.nvs_id = 0x1006,
 	},
@@ -139,11 +139,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "lease_timeout_us",
 		.description = "Lease timeout without valid poll",
 		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
 			.min = 10000,
 			.max = 1000000,
-			.default_value = 300000,
+			.default_value = CONFIG_RADIO_BRIDGE_LEASE_TIMEOUT_US,
 		},
 		.nvs_id = 0x1007,
 	},
@@ -151,11 +151,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "idle_poll_max_us",
 		.description = "Maximum idle poll interval",
 		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
 			.min = 1000,
 			.max = 10000,
-			.default_value = 5000,
+			.default_value = CONFIG_RADIO_BRIDGE_IDLE_POLL_MAX_US,
 		},
 		.nvs_id = 0x1008,
 	},
@@ -188,8 +188,8 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.type = RB_PARAM_UINT32,
 		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
-			.min = 100000,
-			.max = 10000000,
+			.min = 1000000,
+			.max = 1000000,
 			.default_value = CONFIG_TIME_SYNC_PPS_PERIOD_US,
 		},
 		.nvs_id = 0x100B,
@@ -197,11 +197,11 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 	[RB_PARAM_PPS_WIDTH_US] = {
 		.name = "pps_width_us",
 		.description = "PPS pulse width in microseconds",
-		.type = RB_PARAM_UINT16,
+		.type = RB_PARAM_UINT32,
 		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u16 = {
+		.config.u32 = {
 			.min = 10,
-			.max = 10000,
+			.max = 500000,
 			.default_value = CONFIG_TIME_SYNC_PPS_WIDTH_US,
 		},
 		.nvs_id = 0x100C,
@@ -210,7 +210,7 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.name = "radio_delay_us",
 		.description = "Calibrated slave radio delay (us)",
 		.type = RB_PARAM_UINT16,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u16 = {
 			.min = 0,
 			.max = 1000,
@@ -225,7 +225,7 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
 		.config.u16 = {
 			.min = 100,
-			.max = 60000,
+			.max = 10000,
 			.default_value = CONFIG_TIME_SYNC_STATUS_INTERVAL_MS,
 		},
 		.nvs_id = 0x100E,
@@ -266,7 +266,7 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 			.max = 115200,
 			.default_value = CONFIG_TIME_UART_BAUDRATE,
 		},
-		.nvs_id = 0x1011,
+		.nvs_id = 0x1012,
 	},
 	[RB_PARAM_TIME_SOURCE_MODE] = {
 		.name = "time_source_mode",
@@ -278,7 +278,7 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 			.max = 1,
 			.default_value = 0,
 		},
-		.nvs_id = 0x1012,
+		.nvs_id = 0x1011,
 	},
 	[RB_PARAM_PPS_INPUT_DELAY_US] = {
 		.name = "pps_input_delay_us",
@@ -310,6 +310,25 @@ static uint32_t param_get_default(enum rb_param_id id)
 		return desc->config.boolean.default_value ? 1U : 0U;
 	default:
 		return 0;
+	}
+}
+
+static void param_load_defaults(void)
+{
+	for (enum rb_param_id id = 0; id < RB_PARAM_COUNT; id++) {
+		if (rb_param_table[id].type == RB_PARAM_BYTES) {
+			if (rb_param_table[id].config.bytes.default_value != NULL) {
+				memcpy(param_cache[id].data.bytes,
+				       rb_param_table[id].config.bytes.default_value,
+				       rb_param_table[id].config.bytes.length);
+			} else {
+				memset(param_cache[id].data.bytes, 0,
+				       rb_param_table[id].config.bytes.length);
+			}
+		} else {
+			param_cache[id].data.value = param_get_default(id);
+		}
+		param_cache[id].is_persisted = false;
 	}
 }
 
@@ -392,7 +411,6 @@ static struct settings_handler param_settings = {
 int rb_param_config_init(void)
 {
 	int ret;
-	enum rb_param_id id;
 
 	if (initialized) {
 		return 0;
@@ -405,50 +423,42 @@ int rb_param_config_init(void)
 		return ret;
 	}
 
-	/* Initialize cache with default values */
-	for (id = 0; id < RB_PARAM_COUNT; id++) {
-		if (rb_param_table[id].type == RB_PARAM_BYTES) {
-			/* Initialize bytes parameters with default or zeros */
-			if (rb_param_table[id].config.bytes.default_value) {
-				memcpy(param_cache[id].data.bytes,
-				       rb_param_table[id].config.bytes.default_value,
-				       rb_param_table[id].config.bytes.length);
-			} else {
-				memset(param_cache[id].data.bytes, 0,
-				       rb_param_table[id].config.bytes.length);
-			}
-		} else {
-			param_cache[id].data.value = param_get_default(id);
-		}
-		param_cache[id].is_persisted = false;
-	}
+	param_load_defaults();
+	initialized = true;
+	persistence_available = false;
 
 	/* Bind the settings subsystem to its storage backend (NVS on the
 	 * "storage" flash partition). Without this, settings_save_one()
 	 * always fails with -ENOENT: no backend has been mounted yet. */
 	ret = settings_subsys_init();
 	if (ret != 0) {
-		LOG_ERR("settings_subsys_init failed: %d", ret);
-		return ret;
+		LOG_WRN("settings backend unavailable, using defaults: %d", ret);
+		return 0;
 	}
 
 	/* Register settings handler */
 	ret = settings_register(&param_settings);
 	if (ret != 0) {
-		LOG_ERR("settings_register failed: %d", ret);
-		return ret;
+		LOG_WRN("settings handler unavailable, using defaults: %d", ret);
+		return 0;
 	}
 
 	/* Load persisted parameters from NVS */
 	ret = settings_load_subtree(PARAM_NVS_NAMESPACE);
 	if (ret != 0) {
-		LOG_ERR("settings_load_subtree failed: %d", ret);
-		return ret;
+		param_load_defaults();
+		LOG_WRN("settings load failed, using defaults: %d", ret);
+		return 0;
 	}
 
-	initialized = true;
+	persistence_available = true;
 	LOG_INF("Parameter config initialized");
 	return 0;
+}
+
+bool rb_param_persistence_available(void)
+{
+	return initialized && persistence_available;
 }
 
 int rb_param_get_uint32(enum rb_param_id id, uint32_t *value)
@@ -510,7 +520,6 @@ int rb_param_get_bytes(enum rb_param_id id, uint8_t *buffer, size_t *length)
 int rb_param_set_uint32(enum rb_param_id id, uint32_t value)
 {
 	char name[32];
-	k_spinlock_key_t key;
 	int ret;
 
 	if (id >= RB_PARAM_COUNT) {
@@ -519,6 +528,9 @@ int rb_param_set_uint32(enum rb_param_id id, uint32_t value)
 
 	if (!initialized) {
 		return -EAGAIN;
+	}
+	if (!persistence_available) {
+		return -ENOTSUP;
 	}
 
 	/* Validate range */
@@ -531,13 +543,13 @@ int rb_param_set_uint32(enum rb_param_id id, uint32_t value)
 	snprintf(name, sizeof(name), "%s/0x%04x", PARAM_NVS_NAMESPACE,
 		 rb_param_table[id].nvs_id);
 
-	key = k_spin_lock(&param_lock);
+	k_mutex_lock(&param_mutex, K_FOREVER);
 	ret = settings_save_one(name, &value, sizeof(value));
 	if (ret == 0) {
 		param_cache[id].data.value = value;
 		param_cache[id].is_persisted = true;
 	}
-	k_spin_unlock(&param_lock, key);
+	k_mutex_unlock(&param_mutex);
 
 	if (ret != 0) {
 		LOG_ERR("settings_save_one failed: %d", ret);
@@ -564,7 +576,6 @@ int rb_param_set_bool(enum rb_param_id id, bool value)
 int rb_param_set_bytes(enum rb_param_id id, const uint8_t *buffer, size_t length)
 {
 	char name[32];
-	k_spinlock_key_t key;
 	int ret;
 
 	if (id >= RB_PARAM_COUNT || buffer == NULL) {
@@ -578,6 +589,9 @@ int rb_param_set_bytes(enum rb_param_id id, const uint8_t *buffer, size_t length
 	if (!initialized) {
 		return -EAGAIN;
 	}
+	if (!persistence_available) {
+		return -ENOTSUP;
+	}
 
 	if (length != rb_param_table[id].config.bytes.length) {
 		LOG_ERR("Length %zu != expected %zu for %s",
@@ -590,13 +604,13 @@ int rb_param_set_bytes(enum rb_param_id id, const uint8_t *buffer, size_t length
 	snprintf(name, sizeof(name), "%s/0x%04x", PARAM_NVS_NAMESPACE,
 		 rb_param_table[id].nvs_id);
 
-	key = k_spin_lock(&param_lock);
+	k_mutex_lock(&param_mutex, K_FOREVER);
 	ret = settings_save_one(name, buffer, length);
 	if (ret == 0) {
 		memcpy(param_cache[id].data.bytes, buffer, length);
 		param_cache[id].is_persisted = true;
 	}
-	k_spin_unlock(&param_lock, key);
+	k_mutex_unlock(&param_mutex);
 
 	if (ret != 0) {
 		LOG_ERR("settings_save_one failed: %d", ret);
@@ -610,7 +624,6 @@ int rb_param_set_bytes(enum rb_param_id id, const uint8_t *buffer, size_t length
 int rb_param_clear(enum rb_param_id id)
 {
 	char name[32];
-	k_spinlock_key_t key;
 	int ret;
 
 	if (id >= RB_PARAM_COUNT) {
@@ -620,12 +633,15 @@ int rb_param_clear(enum rb_param_id id)
 	if (!initialized) {
 		return -EAGAIN;
 	}
+	if (!persistence_available) {
+		return -ENOTSUP;
+	}
 
 	/* Delete from NVS */
 	snprintf(name, sizeof(name), "%s/0x%04x", PARAM_NVS_NAMESPACE,
 		 rb_param_table[id].nvs_id);
 
-	key = k_spin_lock(&param_lock);
+	k_mutex_lock(&param_mutex, K_FOREVER);
 	ret = settings_delete(name);
 	if (ret == 0 || ret == -ENOENT) {
 		if (rb_param_table[id].type == RB_PARAM_BYTES) {
@@ -643,7 +659,7 @@ int rb_param_clear(enum rb_param_id id)
 		param_cache[id].is_persisted = false;
 		ret = 0;
 	}
-	k_spin_unlock(&param_lock, key);
+	k_mutex_unlock(&param_mutex);
 
 	if (ret != 0) {
 		LOG_ERR("settings_delete failed: %d", ret);
@@ -715,3 +731,13 @@ bool rb_param_is_persisted(enum rb_param_id id)
 
 	return param_cache[id].is_persisted;
 }
+
+#if defined(CONFIG_ZTEST)
+void rb_param_config_test_reset(void)
+{
+	initialized = false;
+	persistence_available = false;
+	memset(param_cache, 0, sizeof(param_cache));
+	memset(default_group_key, 0, sizeof(default_group_key));
+}
+#endif

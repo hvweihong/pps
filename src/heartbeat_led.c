@@ -9,6 +9,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 LOG_MODULE_REGISTER(heartbeat_led, LOG_LEVEL_INF);
 
@@ -23,7 +24,8 @@ LOG_MODULE_REGISTER(heartbeat_led, LOG_LEVEL_INF);
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static K_THREAD_STACK_DEFINE(heartbeat_stack, HEARTBEAT_STACK_SIZE);
 static struct k_thread heartbeat_thread;
-static uint32_t heartbeat_period_ms = HEARTBEAT_LED_DEFAULT_PERIOD_MS;
+static atomic_t heartbeat_period_ms = ATOMIC_INIT(HEARTBEAT_LED_DEFAULT_PERIOD_MS);
+static atomic_t heartbeat_enabled;
 static bool started;
 
 static void heartbeat_thread_fn(void *arg1, void *arg2, void *arg3)
@@ -35,13 +37,21 @@ static void heartbeat_thread_fn(void *arg1, void *arg2, void *arg3)
 	ARG_UNUSED(arg3);
 
 	while (true) {
-		gpio_pin_set_dt(&led, led_on);
-		led_on = !led_on;
-		k_sleep(K_MSEC(heartbeat_period_ms));
+		if (atomic_get(&heartbeat_enabled) != 0) {
+			gpio_pin_set_dt(&led, led_on);
+			led_on = !led_on;
+			k_sleep(K_MSEC(atomic_get(&heartbeat_period_ms)));
+		} else {
+			if (led_on == false) {
+				gpio_pin_set_dt(&led, false);
+				led_on = true;
+			}
+			k_sleep(K_MSEC(100));
+		}
 	}
 }
 
-int heartbeat_led_start(uint32_t period_ms)
+int heartbeat_led_start(bool enabled, uint32_t period_ms)
 {
 	int ret;
 
@@ -58,9 +68,11 @@ int heartbeat_led_start(uint32_t period_ms)
 		return ret;
 	}
 
-	if (period_ms != 0u) {
-		heartbeat_period_ms = period_ms;
+	if (period_ms == 0u) {
+		return -EINVAL;
 	}
+	atomic_set(&heartbeat_period_ms, period_ms);
+	atomic_set(&heartbeat_enabled, enabled);
 
 	k_thread_create(&heartbeat_thread, heartbeat_stack,
 			K_THREAD_STACK_SIZEOF(heartbeat_stack),
@@ -69,6 +81,23 @@ int heartbeat_led_start(uint32_t period_ms)
 	k_thread_name_set(&heartbeat_thread, "heartbeat_led");
 	started = true;
 
-	LOG_INF("heartbeat LED period=%ums", heartbeat_period_ms);
+	LOG_INF("heartbeat LED enabled=%u period=%ums", enabled, period_ms);
+	return 0;
+}
+
+int heartbeat_led_update(bool enabled, uint32_t period_ms)
+{
+	if (!started) {
+		return -EAGAIN;
+	}
+	if (period_ms == 0u) {
+		return -EINVAL;
+	}
+
+	atomic_set(&heartbeat_period_ms, period_ms);
+	atomic_set(&heartbeat_enabled, enabled);
+	if (!enabled) {
+		gpio_pin_set_dt(&led, false);
+	}
 	return 0;
 }

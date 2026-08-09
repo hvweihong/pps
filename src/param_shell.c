@@ -5,10 +5,31 @@
  */
 
 #include "param_config.h"
+#include "bridge_config.h"
 #include <zephyr/shell/shell.h>
 #include <zephyr/kernel.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+
+static void format_bytes_hex(const uint8_t *bytes, size_t len, char *text,
+			     size_t text_size)
+{
+	static const char digits[] = "0123456789abcdef";
+
+	if (text_size < len * 2u + 1u) {
+		if (text_size != 0u) {
+			text[0] = '\0';
+		}
+		return;
+	}
+	for (size_t i = 0u; i < len; i++) {
+		text[i * 2u] = digits[bytes[i] >> 4];
+		text[i * 2u + 1u] = digits[bytes[i] & 0x0fu];
+	}
+	text[len * 2u] = '\0';
+}
 
 /* Helper: find parameter ID by name */
 static int find_param_by_name(const char *name, enum rb_param_id *id)
@@ -74,15 +95,14 @@ static int cmd_param_list(const struct shell *sh, size_t argc, char **argv)
 		if (desc->type == RB_PARAM_BYTES) {
 			bytes_len = sizeof(bytes);
 			if (rb_param_get_bytes(id, bytes, &bytes_len) == 0) {
-				/* Format as hex string (first 8 bytes) */
-				snprintf(value_str, sizeof(value_str),
-					 "%02x%02x%02x%02x%02x%02x%02x%02x...",
-					 bytes[0], bytes[1], bytes[2], bytes[3],
-					 bytes[4], bytes[5], bytes[6], bytes[7]);
+				format_bytes_hex(bytes, bytes_len, value_str,
+						 sizeof(value_str));
 			} else {
 				snprintf(value_str, sizeof(value_str), "(error)");
 			}
-			snprintf(default_str, sizeof(default_str), "(hex bytes)");
+			format_bytes_hex(desc->config.bytes.default_value,
+					 desc->config.bytes.length, default_str,
+					 sizeof(default_str));
 		} else {
 			if (rb_param_get_uint32(id, &value) != 0) {
 				continue;
@@ -124,8 +144,11 @@ static int cmd_param_get(const struct shell *sh, size_t argc, char **argv)
 	enum rb_param_id id;
 	const struct rb_param_descriptor *desc;
 	uint32_t value;
+	uint8_t bytes[32];
+	size_t bytes_len = sizeof(bytes);
 	bool persisted;
 	char flags_str[16];
+	char value_str[65];
 	int ret;
 
 	if (argc < 2) {
@@ -140,17 +163,26 @@ static int cmd_param_get(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	desc = rb_param_get_descriptor(id);
-	ret = rb_param_get_uint32(id, &value);
-	if (ret != 0) {
-		shell_error(sh, "Failed to read parameter: %d", ret);
-		return ret;
-	}
-
 	persisted = rb_param_is_persisted(id);
 	format_flags(desc->flags, flags_str, sizeof(flags_str));
-
-	shell_print(sh, "%s = %u (%s, %s)", desc->name, value,
-		    persisted ? "persisted" : "default", flags_str);
+	if (desc->type == RB_PARAM_BYTES) {
+		ret = rb_param_get_bytes(id, bytes, &bytes_len);
+		if (ret != 0) {
+			shell_error(sh, "Failed to read parameter: %d", ret);
+			return ret;
+		}
+		format_bytes_hex(bytes, bytes_len, value_str, sizeof(value_str));
+		shell_print(sh, "%s = %s (%s, %s)", desc->name, value_str,
+			    persisted ? "persisted" : "default", flags_str);
+	} else {
+		ret = rb_param_get_uint32(id, &value);
+		if (ret != 0) {
+			shell_error(sh, "Failed to read parameter: %d", ret);
+			return ret;
+		}
+		shell_print(sh, "%s = %u (%s, %s)", desc->name, value,
+			    persisted ? "persisted" : "default", flags_str);
+	}
 
 	if (rb_param_requires_reboot(id)) {
 		shell_print(sh, "Note: Reboot required for changes to take effect");
@@ -165,9 +197,11 @@ static int cmd_param_set(const struct shell *sh, size_t argc, char **argv)
 	enum rb_param_id id;
 	const struct rb_param_descriptor *desc;
 	uint32_t value;
+	uint8_t bytes[RB_GROUP_KEY_BYTES];
+	char *end;
 	int ret;
 
-	if (argc < 3) {
+	if (argc != 3u) {
 		shell_error(sh, "Usage: param set <name> <value>");
 		return -EINVAL;
 	}
@@ -181,7 +215,14 @@ static int cmd_param_set(const struct shell *sh, size_t argc, char **argv)
 	desc = rb_param_get_descriptor(id);
 
 	/* Parse value */
-	if (desc->type == RB_PARAM_BOOL) {
+	if (desc->type == RB_PARAM_BYTES) {
+		ret = rb_group_key_parse(argv[2], bytes);
+		if (ret != 0) {
+			shell_error(sh, "Byte parameter requires exactly 32 hexadecimal characters");
+			return -EINVAL;
+		}
+		ret = rb_param_set_bytes(id, bytes, sizeof(bytes));
+	} else if (desc->type == RB_PARAM_BOOL) {
 		if (strcmp(argv[2], "true") == 0 || strcmp(argv[2], "1") == 0) {
 			ret = rb_param_set_bool(id, true);
 		} else if (strcmp(argv[2], "false") == 0 || strcmp(argv[2], "0") == 0) {
@@ -191,7 +232,12 @@ static int cmd_param_set(const struct shell *sh, size_t argc, char **argv)
 			return -EINVAL;
 		}
 	} else {
-		value = (uint32_t)strtoul(argv[2], NULL, 0);
+		errno = 0;
+		value = (uint32_t)strtoul(argv[2], &end, 0);
+		if (errno != 0 || end == argv[2] || *end != '\0') {
+			shell_error(sh, "Invalid numeric value");
+			return -EINVAL;
+		}
 		ret = rb_param_set_uint32(id, value);
 	}
 
@@ -239,6 +285,9 @@ static int cmd_param_clear(const struct shell *sh, size_t argc, char **argv)
 	enum rb_param_id id;
 	const struct rb_param_descriptor *desc;
 	uint32_t default_val;
+	uint8_t bytes[32];
+	size_t bytes_len = sizeof(bytes);
+	char value_str[65];
 	int ret;
 
 	if (argc < 2) {
@@ -259,10 +308,19 @@ static int cmd_param_clear(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	/* Get default value for display */
-	rb_param_get_uint32(id, &default_val);
-
-	shell_print(sh, "%s cleared, using default (%u)", desc->name, default_val);
+	if (desc->type == RB_PARAM_BYTES) {
+		ret = rb_param_get_bytes(id, bytes, &bytes_len);
+		if (ret != 0) {
+			return ret;
+		}
+		format_bytes_hex(bytes, bytes_len, value_str, sizeof(value_str));
+		shell_print(sh, "%s cleared, using default (%s)", desc->name,
+			    value_str);
+	} else {
+		rb_param_get_uint32(id, &default_val);
+		shell_print(sh, "%s cleared, using default (%u)", desc->name,
+			    default_val);
+	}
 
 	return 0;
 }

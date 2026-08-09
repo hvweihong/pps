@@ -113,6 +113,7 @@ void status_log_bridge(void)
 		(unsigned long long)bridge.broadcast_packets,
 		(unsigned long long)bridge.poll_packets);
 	LOG_INF("bridge_link duplicate_packets=%llu invalid_session_packets=%llu "
+		"invalid_group_packets=%llu "
 		"downlink_gap_packets=%llu downlink_duplicate_packets=%llu "
 		"queue_drop_bytes=%llu "
 		"active_count=%u suspect_count=%u slave_active=%u slave_node_id=%u "
@@ -121,6 +122,7 @@ void status_log_bridge(void)
 		"last_action_error_action=%u",
 		(unsigned long long)bridge.duplicate_packets,
 		(unsigned long long)bridge.invalid_session_packets,
+		(unsigned long long)bridge.invalid_group_packets,
 		(unsigned long long)bridge.downlink_gap_packets,
 		(unsigned long long)bridge.downlink_duplicate_packets,
 		(unsigned long long)bridge.queue_drop_bytes,

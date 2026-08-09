@@ -701,3 +701,96 @@ frame type 计数；主动丢弃 TX 时向 runtime 排入 synthetic TX-success�
 双板实测证明单物理 slave 的 record attribution、完整 UART descriptor draining 与一次 ACK_UPLINK
 丢失恢复；三 slave 的独立 round-robin/不拼接由 native test 覆盖。当前没有第二、第三块 slave，
 因此不把多物理 slave 并发宣称为板级实测；外部 PPS/GNSS 和 `<=20 us` 相位边界保持不变。
+
+## Stage 7 — Effective NVS parameters and group isolation
+
+执行日期：2026-08-09。基线为 Stage 6 提交 `f5ba8f5`。本阶段修正 settings/NVS 缺失时的
+默认值 fallback、持久化 mutex、32-hex group key shell、reboot/runtime flags，并把 UART baud、
+radio delay、固定 1 Hz PPS、100 ms pulse width、runtime status/LED 与 early group reject 接到真实
+consumer。`invalid_group_packets` 在任何 sync session/filter 状态变化前计数。
+
+### Host/build evidence
+
+- bridge native suite：**135/135 PASS**；sync native suite：**16/16 PASS**；Python
+  board/flash suite：**51/51 PASS**。
+- 全部 active static checks、`ruff` 与 `git diff --check` PASS。新增参数 fallback/bytes/flags、
+  固定 ring/PPS 范围、radio delay 方向、group mismatch 不修改 slave 状态，以及 action failure
+  必须让出 runtime 内层循环的回归门禁。
+- validation build：FLASH `180196 B`、RAM `192692 B`（73.51%）、UF2 `360448 B`，最终
+  SHA-256 `19b504ef4248be178ebbe6b30f91a40d20b80b7ac3186b6281346f7c5a4d54db`。
+
+### ESB TX failure root cause and recovery
+
+最初两轮 Stage 7 门禁中，master 均在启动约 0.4 s 后停在 `radio_tx_packets=63`、
+`radio_retry_exhausted=8`、`sync_tx_capture_count=4`，随后每个 sync action 都由
+`esb_write_payload()` 返回 `-ENOMEM`。将两板持久化 `pps_width_us` 从 100000 单独改为 100 后，
+`build/board-e2e/20260809T103024.674615Z-stage7-pps-width-100-ab/` 仍以相同计数失败，故排除
+100 ms PPS pulse width 为诱因。
+
+Nordic ESB 在可靠 PTX 的 `TX_FAILED` 分支不会从 TX FIFO 弹出失败 payload；当前 runtime 的
+transaction gate 每次只有一帧在途，但 slave 被随后重刷时连续 8 次 poll 失败，恰好填满
+`CONFIG_ESB_TX_FIFO_SIZE=8`。transport 现于 `ESB_EVENT_TX_FAILED` 事件中调用
+`esb_pop_tx()`，失败时输出明确 error log；静态回归要求该清理路径存在。修复后以完全相同的
+master-first/slave-second 刷写顺序运行：
+
+```sh
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage7-esb-tx-failed-recovery \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage7-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage7-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 --bridge-repeats 1 \
+  --steady-state-seconds 5 --command-timeout 15
+```
+
+- **`BOARD_E2E PASS`** after 38.1 s；两板各 flash 一次，零 retry/recovery；无线恢复
+  `active_count=1`/`LOCKED`，双向 600-byte exact verify 和所有 queue/drop 门禁通过。
+- Raw evidence：
+  `build/board-e2e/20260809T103645.184837Z-stage7-esb-tx-failed-recovery/master.raw.log`、
+  `build/board-e2e/20260809T103645.184837Z-stage7-esb-tx-failed-recovery/slave.raw.log`。
+
+### Persisted parameter and group hardware gates
+
+两板均持久化并 cold reboot 验证：master/slave `role_id=0/1`、`uart_baudrate=115200`、
+`pps_width_us=100000`、`time_source_mode=0`、`group_id=1`、
+`group_key=00112233445566778899aabbccddeeff`。`param list` 对这些值均报告 `yes/reboot`，
+未覆写的固定 period/ring 与 runtime status/LED 仍报告 compiled default 和准确 flags。
+
+- 批准的 100 ms PPS 参数下，
+  `build/board-e2e/20260809T103926.069039Z-stage7-approved-params-100ms/` 完成 exact-ID flash、
+  `active_count=1`/`LOCKED`、双向 600-byte exact verify、5 s steady state，零 retry/recovery/drop。
+- 只把 slave 改为 `group_id=2` 并 reboot 后，master 最新 `active_count=0`，slave
+  `UNLOCKED` 且 `radio_rx_packets=0`；证据位于
+  `build/board-e2e/20260809-stage7-group-isolation/`。
+- 恢复 slave `group_id=1` 后，首次立即重刷在 10 s boot-guard clear 之前发生，按设计进入
+  diagnostic safety loop；该失败保留于
+  `build/board-e2e/20260809T104134.380373Z-stage7-group-restored/`，不计为通过。guard 自动删除后
+  重跑 `build/board-e2e/20260809T104258.426861Z-stage7-group-restored-retry/`，再次达到
+  `active_count=1`/`LOCKED`、双向 600-byte exact verify、5 s steady state，零 retry/recovery/drop。
+
+提交前独立规格审查发现外部时间参数的稳定 NVS ID 与批准计划相反，并指出异组回归只覆盖了
+scheduler。修复后 `time_source_mode/time_uart_baudrate/pps_input_delay_us` 分别固定为
+`0x1011/0x1012/0x1013`；新增原生 runtime policy 测试验证异组帧只增加
+`invalid_group_packets`，不改变 sync sequence、relock、UTC 等状态，同时静态门禁要求该策略在
+session/filter/counter 修改之前执行。最终固件重新运行固定 ID 双板门禁：
+
+- `build/board-e2e/20260809T110223.197347Z-stage7-review-fixes/`：**BOARD_E2E PASS**，
+  `active_count=1`/`LOCKED`、双向 600-byte exact verify、5 s steady state，零
+  flash retry、command recovery、queue/drop 与 time-UART error。
+
+代码质量审查进一步指出旧固件曾使用反向的两个时间参数 ID；用户明确选择不做兼容迁移，直接在
+两块板上清除旧布局。固定 ID CDC 操作已分别执行 `param clear time_source_mode` 与
+`param clear time_uart_baudrate`，随后两板均报告 `0 (default)` 与 `9600 (default)`。同一轮审查还
+发现 `status_interval_ms` 原最大值 60000 ms 会超过 30000 ms watchdog；新增 RED→GREEN 原生测试并
+将上限收紧至 10000 ms。最终固件再次通过：
+
+- `build/board-e2e/20260809T111825.465847Z-stage7-final-clean-ids-watchdog/`：
+  **BOARD_E2E PASS**，`active_count=1`/`LOCKED`、双向 600-byte exact verify、5 s steady
+  state，零 flash retry、command recovery、queue/drop 与 time-UART error。
+
+### Verification boundary
+
+本阶段通过板上 counter 与无线同步证明固定 1 Hz/100 ms PPS scheduler 持续运行，但仍没有示波器
+或外部 PPS/GNSS fixture，因此不声明 `<=20 us` 电气相位精度。真实物理 UART 双向数据将在下一阶段
+使用本机 `/dev/ttyACM2` 与 adb 端 `/dev/ttyS1` 单独验证；本阶段的 600-byte 链路仍使用 validation
+CDC injection/capture。

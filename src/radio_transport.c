@@ -209,6 +209,7 @@ static void rb_esb_event_handler(const struct esb_evt *event)
 {
 	struct rb_radio_event queued = {0};
 	struct esb_payload payload = {0};
+	int err;
 
 	if (event == NULL) {
 		return;
@@ -223,6 +224,10 @@ static void rb_esb_event_handler(const struct esb_evt *event)
 		queued.type = RB_RADIO_EVENT_TX_SUCCESS;
 		break;
 	case ESB_EVENT_TX_FAILED:
+		err = esb_pop_tx();
+		if (err != 0) {
+			LOG_ERR("failed to release ESB TX payload after TX_FAILED: %d", err);
+		}
 		queued.type = RB_RADIO_EVENT_TX_FAILED;
 		break;
 	case ESB_EVENT_RX_RECEIVED:

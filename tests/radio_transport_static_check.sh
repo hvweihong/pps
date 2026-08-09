@@ -24,6 +24,10 @@ if rg -Fq 'LOG_INF("ESB configured:' "$src"; then
     echo "normal ESB profile switches must not flood INFO logs" >&2
     exit 1
 fi
+if ! rg -UPq 'case ESB_EVENT_TX_FAILED:[\s\S]*?esb_pop_tx\(\)' "$src"; then
+    echo "TX_FAILED must remove the failed ESB payload before the next send" >&2
+    exit 1
+fi
 
 # ASSIGN must be sent to the candidate's temporary DEVICEID-derived address, not
 # the stable group address, or the hardware ACK required for admission never

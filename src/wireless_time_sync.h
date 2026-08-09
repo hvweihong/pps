@@ -11,13 +11,15 @@ struct rb_wireless_time_sync {
 	uint32_t session;
 	uint32_t next_sequence;
 	uint32_t sync_interval_us;
+	uint32_t radio_delay_us;
 	uint64_t next_pps_master_tick;
 	struct rb_sync_tracker tracker;
 };
 
 void wireless_time_sync_init(struct rb_wireless_time_sync *sync,
 			     uint32_t session, uint32_t sync_interval_us,
-			     uint64_t next_pps_master_tick);
+			     uint64_t next_pps_master_tick,
+			     uint32_t radio_delay_us);
 int wireless_time_sync_master_build(struct rb_wireless_time_sync *sync,
 				    uint64_t next_pps_tick,
 				    struct rb_sync_discovery *frame);

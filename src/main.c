@@ -129,7 +129,7 @@ int main(void)
 	uint32_t reset_reason = nrf_power_resetreas_get(NRF_POWER);
 	struct radio_boot_guard_load_context boot_guard = {0};
 	struct rb_radio_retained_diag retained_diag = {0};
-	uint32_t role_id, uart_baud, group_id, pps_period_us, status_interval_ms;
+	uint32_t role_id, uart_baud, group_id, status_interval_ms;
 	uint32_t pps_width_us, led_period_ms;
 
 	ret = rb_param_config_init();
@@ -137,30 +137,31 @@ int main(void)
 		LOG_ERR("param config init failed: %d", ret);
 		return 0;
 	}
-	ret = settings_load_subtree_direct(RB_RADIO_BOOT_GUARD_KEY,
+	if (rb_param_persistence_available()) {
+		ret = settings_load_subtree_direct(RB_RADIO_BOOT_GUARD_KEY,
 					 radio_boot_guard_load_cb, &boot_guard);
-	if (ret != 0 || boot_guard.error != 0 || boot_guard.found) {
-		int load_error = boot_guard.error != 0 ? boot_guard.error : ret;
+		if (ret != 0 || boot_guard.error != 0 || boot_guard.found) {
+			int load_error = boot_guard.error != 0 ? boot_guard.error : ret;
 
-		retained_diag_valid = radio_transport_retained_diag_get(&retained_diag);
-		if (boot_guard.found) {
-			ret = settings_delete(RB_RADIO_BOOT_GUARD_KEY);
-			if (ret != 0) {
-				LOG_ERR("radio boot guard clear failed: %d", ret);
+			retained_diag_valid = radio_transport_retained_diag_get(&retained_diag);
+			if (boot_guard.found) {
+				ret = settings_delete(RB_RADIO_BOOT_GUARD_KEY);
+				if (ret != 0) {
+					LOG_ERR("radio boot guard clear failed: %d", ret);
+				}
 			}
-		}
-		radio_transport_retained_diag_clear();
-		register_usbd_callbacks();
-		for (;;) {
-			uint8_t history_start;
+			radio_transport_retained_diag_clear();
+			register_usbd_callbacks();
+			for (;;) {
+				uint8_t history_start;
 
-			LOG_ERR("radio boot guard recovered: reset_reason=0x%08x "
+				LOG_ERR("radio boot guard recovered: reset_reason=0x%08x "
 				"load_error=%d guard=0x%08x retained=%u stage=0x%02x "
 				"switch=%u current=%u target=%u active=%u result=%d "
 				"action=%u event=%u length=%u radio_state=%u "
 				"events_disabled=%u hfclkstat=0x%08x primask=%u ipsr=%u "
 				"updates=%u",
-				reset_reason, load_error, boot_guard.value,
+					reset_reason, load_error, boot_guard.value,
 				retained_diag_valid, retained_diag.stage,
 				retained_diag.switch_index,
 				retained_diag.current_profile,
@@ -173,40 +174,42 @@ int main(void)
 				retained_diag.events_disabled,
 				retained_diag.hfclkstat, retained_diag.primask,
 				retained_diag.ipsr, retained_diag.update_count);
-			history_start = (retained_diag.history_next +
+				history_start = (retained_diag.history_next +
 				RB_RADIO_RETAINED_HISTORY_SIZE - retained_diag.history_count) %
 				RB_RADIO_RETAINED_HISTORY_SIZE;
-			for (uint8_t i = 0u; i < retained_diag.history_count; i++) {
-				const struct rb_radio_retained_diag_entry *entry =
+				for (uint8_t i = 0u; i < retained_diag.history_count; i++) {
+					const struct rb_radio_retained_diag_entry *entry =
 					&retained_diag.history[(history_start + i) %
 						RB_RADIO_RETAINED_HISTORY_SIZE];
 
-				LOG_ERR("radio diag history: seq=%u cycle=%u stage=0x%02x "
+					LOG_ERR("radio diag history: seq=%u cycle=%u stage=0x%02x "
 					"result=%d action=%u event=%u length=%u state=%u "
 					"current=%u target=%u active=%u primask=%u",
-					entry->sequence, entry->cycle, entry->stage,
+						entry->sequence, entry->cycle, entry->stage,
 					entry->result, entry->runtime_action,
 					entry->radio_event_id, entry->payload_length,
 					entry->radio_state, entry->current_profile,
 					entry->target_profile, entry->esb_active,
 					entry->primask);
-				k_sleep(K_MSEC(100));
+					k_sleep(K_MSEC(100));
+				}
+				k_sleep(K_SECONDS(1));
 			}
-			k_sleep(K_SECONDS(1));
 		}
-	}
-	ret = settings_save_one(RB_RADIO_BOOT_GUARD_KEY,
+		ret = settings_save_one(RB_RADIO_BOOT_GUARD_KEY,
 				&((uint32_t){RB_RADIO_BOOT_GUARD_MAGIC}),
 				sizeof(uint32_t));
-	if (ret != 0) {
-		register_usbd_callbacks();
-		for (;;) {
-			LOG_ERR("radio boot guard arm failed: %d; radio disabled", ret);
-			k_sleep(K_SECONDS(2));
+		if (ret != 0) {
+			register_usbd_callbacks();
+			for (;;) {
+				LOG_ERR("radio boot guard arm failed: %d; radio disabled", ret);
+				k_sleep(K_SECONDS(2));
+			}
 		}
+		boot_guard_armed = true;
+		boot_guard_clear_at =
+			k_uptime_get() + RB_RADIO_BOOT_GUARD_CLEAR_DELAY_MS;
 	}
-	boot_guard_armed = true;
-	boot_guard_clear_at = k_uptime_get() + RB_RADIO_BOOT_GUARD_CLEAR_DELAY_MS;
 
 	ret = rb_param_get_uint32(RB_PARAM_ROLE_ID, &role_id);
 	if (ret != 0) {
@@ -222,12 +225,6 @@ int main(void)
 	ret = rb_param_get_uint32(RB_PARAM_GROUP_ID, &group_id);
 	if (ret != 0) {
 		LOG_ERR("failed to read group_id: %d", ret);
-		return 0;
-	}
-
-	ret = rb_param_get_uint32(RB_PARAM_PPS_PERIOD_US, &pps_period_us);
-	if (ret != 0) {
-		LOG_ERR("failed to read pps_period_us: %d", ret);
 		return 0;
 	}
 
@@ -270,18 +267,16 @@ int main(void)
 		LOG_ERR("timebase init failed: %d", ret);
 		return 0;
 	}
-	ret = pps_output_init((uint16_t)pps_width_us);
+	ret = pps_output_init(pps_width_us);
 	if (ret != 0) {
 		LOG_ERR("pps init failed: %d", ret);
 		return 0;
 	}
-	if (led_heartbeat) {
-		ret = heartbeat_led_start((uint16_t)led_period_ms);
-		if (ret != 0) {
-			LOG_WRN("heartbeat LED disabled: %d", ret);
-		}
+	ret = heartbeat_led_start(led_heartbeat, led_period_ms);
+	if (ret != 0) {
+		LOG_WRN("heartbeat LED unavailable: %d", ret);
 	}
-	ret = pps_output_start_periodic(timebase_now_us() + 100000u, pps_period_us);
+	ret = pps_output_start_periodic(timebase_now_us() + 100000u, 1000000u);
 	if (ret != 0) {
 		LOG_ERR("pps periodic start failed: %d", ret);
 		return 0;
@@ -316,6 +311,23 @@ int main(void)
 		}
 		if (wdt_dev != NULL) {
 			wdt_feed(wdt_dev, wdt_channel_id);
+		}
+		ret = rb_param_get_uint32(RB_PARAM_STATUS_INTERVAL_MS,
+					  &status_interval_ms);
+		if (ret != 0) {
+			LOG_WRN("failed to refresh status_interval_ms: %d", ret);
+		}
+		ret = rb_param_get_bool(RB_PARAM_LED_HEARTBEAT, &led_heartbeat);
+		if (ret != 0) {
+			LOG_WRN("failed to refresh led_heartbeat: %d", ret);
+		}
+		ret = rb_param_get_uint32(RB_PARAM_LED_PERIOD_MS, &led_period_ms);
+		if (ret != 0) {
+			LOG_WRN("failed to refresh led_period_ms: %d", ret);
+		}
+		ret = heartbeat_led_update(led_heartbeat, led_period_ms);
+		if (ret != 0 && ret != -EAGAIN) {
+			LOG_WRN("heartbeat LED update failed: %d", ret);
 		}
 		k_sleep(K_MSEC(status_interval_ms));
 	}

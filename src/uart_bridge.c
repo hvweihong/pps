@@ -193,10 +193,10 @@ static void uart_callback(const struct device *dev, struct uart_event *event,
 	}
 }
 
-int uart_bridge_init(void)
+int uart_bridge_init(uint32_t baudrate)
 {
 	struct uart_config config = {
-		.baudrate = CONFIG_RADIO_BRIDGE_UART_BAUDRATE,
+		.baudrate = baudrate,
 		.parity = UART_CFG_PARITY_NONE,
 		.stop_bits = UART_CFG_STOP_BITS_1,
 		.data_bits = UART_CFG_DATA_BITS_8,

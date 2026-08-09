@@ -102,6 +102,44 @@ ZTEST(slave_scheduler, test_matching_discovery_schedules_hashed_slot_hello)
 	zassert_equal(rb_scheduler_next_action(&slave, 20000, &action), -EAGAIN);
 }
 
+ZTEST(slave_scheduler, test_mismatched_group_discovery_changes_no_state)
+{
+	struct rb_sync_discovery sync = {
+		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 99, 0, 0),
+		.group_id = 42,
+		.sync_sequence = 7,
+		.discovery_nonce = 0xabc,
+		.free_slots = 1,
+		.response_slot_count = 8,
+		.response_slot_us = 500,
+	};
+	struct rb_scheduler_core slave;
+	struct rb_scheduler_config config = {
+		.master = false,
+		.group_id = 41,
+		.master_session = 9,
+		.device_id = 10,
+		.sync_interval_us = 100000,
+		.lease_timeout_us = 100000,
+	};
+	struct rb_radio_event_view event = {
+		.type = RB_EVENT_VIEW_RX_RECEIVED,
+		.address_tick = 1000,
+	};
+	uint8_t wire[RB_ESB_MAX_PAYLOAD];
+	size_t wire_len;
+
+	rb_scheduler_init(&slave, &config);
+	zassert_ok(rb_sync_discovery_encode(&sync, wire, sizeof(wire), &wire_len));
+	event.wire = wire;
+	event.wire_len = wire_len;
+	rb_scheduler_on_radio_event(&slave, &event, 1000);
+	zassert_equal(slave.config.master_session, 9u);
+	zassert_false(slave.slave_hello_pending);
+	zassert_false(slave.slave_assign_rx_pending);
+	zassert_equal(slave.slave_discovery_nonce, 0u);
+}
+
 ZTEST(slave_scheduler, test_failed_hello_retries_after_global_backoff)
 {
 	struct rb_sync_discovery sync = {

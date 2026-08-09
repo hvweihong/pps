@@ -73,12 +73,14 @@ config RADIO_BRIDGE_IDLE_POLL_MAX_US
 	range 1000 5000
 
 config TIME_SYNC_PPS_PERIOD_US
-	int "PPS period"
+	int "Fixed PPS period"
 	default 1000000
+	range 1000000 1000000
 
 config TIME_SYNC_PPS_WIDTH_US
 	int "PPS pulse width"
-	default 100
+	default 100000
+	range 10 500000
 
 config TIME_SYNC_RADIO_DELAY_US
 	int "Calibrated slave radio delay"

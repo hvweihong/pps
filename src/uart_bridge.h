@@ -22,7 +22,7 @@ struct rb_uart_stats {
 
 typedef void (*rb_uart_bridge_wake_fn)(void);
 
-int uart_bridge_init(void);
+int uart_bridge_init(uint32_t baudrate);
 size_t uart_bridge_read(uint8_t *data, size_t max_len);
 size_t uart_bridge_write(const uint8_t *data, size_t len);
 int uart_bridge_write_record(const uint8_t *data, size_t len);

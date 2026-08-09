@@ -1,6 +1,7 @@
 #ifndef BRIDGE_RUNTIME_H_
 #define BRIDGE_RUNTIME_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "link_protocol.h"
@@ -21,6 +22,7 @@ struct rb_bridge_stats {
 	uint64_t downlink_gap_packets;
 	uint64_t downlink_duplicate_packets;
 	uint64_t invalid_session_packets;
+	uint64_t invalid_group_packets;
 	uint64_t queue_drop_bytes;
 	uint64_t node_record_count[RB_MAX_SOURCE_NODE];
 	uint64_t node_record_bytes[RB_MAX_SOURCE_NODE];
@@ -67,6 +69,19 @@ struct rb_bridge_stats {
 	uint8_t utc_state;
 	uint8_t utc_quality;
 };
+
+static inline bool rb_bridge_runtime_accept_sync_group(
+	uint32_t expected_group_id, uint32_t frame_group_id,
+	struct rb_bridge_stats *stats)
+{
+	if (frame_group_id == expected_group_id) {
+		return true;
+	}
+	if (stats != NULL) {
+		stats->invalid_group_packets++;
+	}
+	return false;
+}
 
 int bridge_runtime_init(void);
 int bridge_runtime_start(void);

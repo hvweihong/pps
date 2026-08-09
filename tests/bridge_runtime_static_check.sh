@@ -21,8 +21,27 @@ if ! grep -Pzq 'rb_scheduler_master_peek_record[\s\S]*uart_bridge_write_record[\
 	echo "master record must be peeked, accepted by UART, then popped" >&2
 	exit 1
 fi
+if ! awk '
+	/if \(action_ret != 0\)/ { seen = 1; in_block = 1; next }
+	in_block && /break;/ { found_break = 1 }
+	in_block && /^[[:space:]]*}[[:space:]]*$/ { closed = 1; in_block = 0 }
+	END { exit !(seen && closed && found_break) }
+' "${FILE}"; then
+	echo "failed runtime actions must yield so queued radio events can drain" >&2
+	exit 1
+fi
 grep -q 'rb_scheduler_next_action' "${FILE}"
 grep -q 'rb_scheduler_uart_available' "${FILE}"
+if ! awk '
+	/runtime_apply_sync\(/ { in_function = 1 }
+	in_function && /rb_bridge_runtime_accept_sync_group/ && gate == 0 { gate = NR }
+	in_function && /wireless_sync\.session|sync_filter_reset|sync_rx_count\+\+/ && mutation == 0 { mutation = NR }
+	in_function && /^}/ { exit !(gate > 0 && mutation > 0 && gate < mutation) }
+	END { if (in_function) exit !(gate > 0 && mutation > 0 && gate < mutation) }
+' "${FILE}"; then
+	echo "sync group gate must run before session/filter/counter mutation" >&2
+	exit 1
+fi
 for token in sync_pair_count sync_tracker_wait_count sync_tracker_error_count \
              sync_filter_update_count sync_filter_error_count \
              sync_tx_build_count sync_tx_capture_count sync_tx_failure_count \

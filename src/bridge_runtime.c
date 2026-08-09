@@ -52,7 +52,6 @@ static struct rb_bridge_stats bridge_stats;
 static struct rb_radio_addresses radio_addresses;
 static uint8_t group_key[RB_GROUP_KEY_BYTES];
 static uint32_t runtime_group_id;
-static uint32_t runtime_pps_period_us;
 static uint32_t runtime_time_source_mode;
 static uint32_t runtime_pps_input_delay_us;
 static uint64_t local_device_id;
@@ -321,7 +320,8 @@ static void runtime_apply_sync(const struct rb_radio_event *event)
 	    rb_sync_discovery_decode(event->data, event->length, &frame) != 0) {
 		return;
 	}
-	if (frame.group_id != runtime_group_id) {
+	if (!rb_bridge_runtime_accept_sync_group(runtime_group_id, frame.group_id,
+						 &bridge_stats)) {
 		return;
 	}
 	if (frame.common.master_session == 0u || frame.sync_sequence == 0u ||
@@ -374,9 +374,9 @@ static void runtime_apply_sync(const struct rb_radio_event *event)
 		return;
 	}
 	local_pps = time_sync_select_pps_target(local_pps,
-						       runtime_pps_period_us,
+						       1000000u,
 						       timebase_now_us(),
-						       runtime_pps_period_us,
+						       1000000u,
 						       pps_output_scheduled_tick(), 100u);
 	ret = pps_output_reset_epoch(local_pps);
 	if (ret != 0) {
@@ -567,8 +567,7 @@ static int runtime_execute_action(struct rb_scheduler_action *action)
 				return -EBADMSG;
 			}
 			if (next_pps <= timebase_now_us()) {
-				next_pps = timebase_now_us() +
-					runtime_pps_period_us;
+				next_pps = timebase_now_us() + 1000000u;
 			}
 			if (wireless_time_sync_master_build(&wireless_sync, next_pps,
 							      &published) != 0) {
@@ -719,7 +718,11 @@ static void bridge_thread_fn(void *p1, void *p2, void *p3)
 				bridge_stats.last_action_error_action =
 					(uint8_t)action.type;
 				rb_scheduler_action_failed(&scheduler, &action,
-						   timebase_now_us());
+							   timebase_now_us());
+				radio_transport_retained_diag_note(
+					RB_RADIO_BOOT_STAGE_ACTION_RETURNED,
+					(uint8_t)action.type, action_ret);
+				break;
 			}
 			radio_transport_retained_diag_note(
 				RB_RADIO_BOOT_STAGE_ACTION_RETURNED,
@@ -742,6 +745,7 @@ int bridge_runtime_init(void)
 	struct rb_scheduler_config config;
 	struct rb_radio_transport_config radio_config;
 	uint32_t group_id, sync_interval_us, aggregation_timeout_us, time_uart_baud;
+	uint32_t uart_baud, radio_delay_us;
 	uint32_t max_idle_poll_us, lease_timeout_us, assignment_window_us;
 	uint32_t response_slot_count, response_slot_us;
 	int ret;
@@ -791,9 +795,14 @@ int bridge_runtime_init(void)
 		LOG_ERR("Failed to read response_slot_us: %d", ret);
 		return ret;
 	}
-	ret = rb_param_get_uint32(RB_PARAM_PPS_PERIOD_US, &runtime_pps_period_us);
+	ret = rb_param_get_uint32(RB_PARAM_UART_BAUDRATE, &uart_baud);
 	if (ret != 0) {
-		LOG_ERR("Failed to read pps_period_us: %d", ret);
+		LOG_ERR("Failed to read uart_baudrate: %d", ret);
+		return ret;
+	}
+	ret = rb_param_get_uint32(RB_PARAM_RADIO_DELAY_US, &radio_delay_us);
+	if (ret != 0) {
+		LOG_ERR("Failed to read radio_delay_us: %d", ret);
 		return ret;
 	}
 	ret = rb_param_get_uint32(RB_PARAM_TIME_UART_BAUDRATE, &time_uart_baud);
@@ -880,8 +889,8 @@ int bridge_runtime_init(void)
 		filter_config.sync_interval_us = sync_interval_us;
 		sync_filter_init(&sync_filter_runtime, &filter_config);
 	}
-	wireless_time_sync_init(&wireless_sync, config.master_session,
-					sync_interval_us, 0);
+	wireless_time_sync_init(&wireless_sync, config.master_session, sync_interval_us,
+				0, radio_delay_us);
 	{
 		struct rb_utc_clock_config utc_config = {
 			.external_mode = config.master && runtime_time_source_mode == 1u,
@@ -893,7 +902,7 @@ int bridge_runtime_init(void)
 		bridge_stats.utc_state = (uint8_t)rb_utc_clock_state(&utc_clock);
 		bridge_stats.utc_quality = RB_TIME_UTC_INVALID;
 	}
-	ret = uart_bridge_init();
+	ret = uart_bridge_init(uart_baud);
 	if (ret != 0) {
 		return ret;
 	}

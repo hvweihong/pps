@@ -22,7 +22,7 @@ apply_match = re.search(
 if not apply_match:
     raise SystemExit("runtime_apply_sync body not found")
 apply_body = apply_match.group("body")
-group_guard = apply_body.find("frame.group_id != runtime_group_id")
+group_guard = apply_body.find("rb_bridge_runtime_accept_sync_group")
 if group_guard < 0:
     raise SystemExit("runtime_apply_sync must reject a mismatched group")
 for mutation in (

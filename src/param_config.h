@@ -21,9 +21,11 @@ extern "C" {
  * Loads all persisted parameters from NVS. Falls back to Kconfig
  * defaults for parameters not found in NVS.
  *
- * @return 0 on success, negative errno on failure.
+ * @return 0 when defaults are available, including defaults-only mode;
+ *         negative errno only if compiled defaults are invalid.
  */
 int rb_param_config_init(void);
+bool rb_param_persistence_available(void);
 
 /**
  * @brief Get parameter value as uint32_t.
@@ -137,6 +139,10 @@ const struct rb_param_descriptor *rb_param_get_descriptor(enum rb_param_id id);
  * @return true if value is stored in NVS, false if using default
  */
 bool rb_param_is_persisted(enum rb_param_id id);
+
+#if defined(CONFIG_ZTEST)
+void rb_param_config_test_reset(void);
+#endif
 
 #ifdef __cplusplus
 }

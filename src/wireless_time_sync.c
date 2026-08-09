@@ -4,7 +4,8 @@
 
 void wireless_time_sync_init(struct rb_wireless_time_sync *sync,
 			     uint32_t session, uint32_t sync_interval_us,
-			     uint64_t next_pps_master_tick)
+			     uint64_t next_pps_master_tick,
+			     uint32_t radio_delay_us)
 {
 	if (sync == NULL) {
 		return;
@@ -13,6 +14,7 @@ void wireless_time_sync_init(struct rb_wireless_time_sync *sync,
 		.session = session,
 		.next_sequence = 1,
 		.sync_interval_us = sync_interval_us,
+		.radio_delay_us = radio_delay_us,
 		.next_pps_master_tick = next_pps_master_tick,
 	};
 	rb_sync_tracker_init(&sync->tracker);
@@ -75,6 +77,9 @@ int wireless_time_sync_slave_receive(struct rb_wireless_time_sync *sync,
 				       frame->sync_sequence - 1u,
 				       frame->previous_master_address_tick,
 				       frame->next_pps_master_tick, observation);
+	if (err == 0) {
+		observation->master_tick += sync->radio_delay_us;
+	}
 	rb_sync_tracker_record_local(&sync->tracker, frame->sync_sequence,
 				     local_address_tick);
 	return err;
