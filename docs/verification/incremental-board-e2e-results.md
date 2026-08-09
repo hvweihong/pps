@@ -962,3 +962,68 @@ Evidence：
 - 示波器确认 1 Hz、100 ms 脉宽；
 - external locked 状态下确认两板 PPS 上升沿相位误差 `<=20 us`；
 - 三块真实 slave 的并发 record/round-robin 压力测试。
+
+### Default data UART 921600 validation (2026-08-10)
+
+本阶段将物理数据 UART 的编译默认值从 115200 改为 **921600**。NVS `uart_baudrate` 的
+`1200..3000000` 范围、持久化覆盖优先级、USB CDC 115200 line coding 和外部时间 UART
+9600 默认值均保持不变。实现提交为 `0670a0e`，随后将 config native 测试改为直接消费根
+`Kconfig`（不再复制编译宏），修复提交为 `4261409`。
+
+软件证据：
+
+- 五套 native suite、69 项 host unittest 和 ruff 均通过；
+- production `CONFIG_RADIO_BRIDGE_UART_BAUDRATE=921600`，UF2 SHA-256
+  `d1ca3120e46e6b99b6b573852d426002b17748f7b887706842f6a968870a080d`；
+- validation UF2 SHA-256
+  `11ab6e4eb5fab3843dabb99b61e17a6e916734c53b0ca66509f0da23556adbe0`；
+- 将 Kconfig 临时改回 115200 时，config native 的两条编译默认断言均按预期失败，恢复
+  921600 后重新通过。
+
+双板 validation NVS 清理与无线/CDC 门禁：
+
+- 两个完整 USB ID 均 exact-ID 刷写一次、零 flash retry/recovery；
+- `param clear uart_baudrate` 后两板均报告
+  `uart_baudrate = 921600 (default, reboot)`；master/slave 角色保持 0/1；
+- cold reboot 后 master `active_count=1`、slave `LOCKED`，冷重启前后双向 600-byte
+  exact verify 均通过；queue/UART/time-UART drop 和 start error 全为 0；
+- 证据：
+  `build/board-e2e/20260809T164037.796106480Z-uart-921600-nvs-clear/summary.json`；
+  `build/board-e2e/20260809T164240.083897Z-uart-921600-final/summary.json`。
+
+随后在既有接线（`/dev/ttyACM2 <-> DBE5C3D84EA2EC6F`、adb
+`/dev/ttyS1 <-> 5B3D71D27A709CA2`，共地、8N1、无流控）下，由同一物理矩阵脚本先将上述
+production UF2 按两个完整 USB ID 各刷写一次，并把 UF2 SHA-256、刷写次数、retry/recovery、
+角色、921600 默认来源和无线 ready 状态写入同一 `summary.json`；两板均首次刷写成功、零
+retry/recovery，master `active_count=1`、slave `LOCKED` 后才开始发送数据。矩阵执行独立
+magic/direction/sequence/length/CRC32 帧的四个场景。延时定义为源端首字节写入
+前的 monotonic 时间到目的端完整帧解析时间；adb 远端通过同一持久 worker 的 PING/PONG
+做 midpoint 校准，表中不确定度为该场景校准上界。四场景均 expected/received SHA-256
+一致、20/20 或 100/100 帧完整，remote worker 清理确认完成：
+
+| 场景 | 方向 | 帧数 | 线上吞吐 B/s | min ms | P50 ms | P95 ms | P99 ms | max ms | 校准不确定度 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 B × 10 pps | master→slave | 20 | 493 | 5.346 | 5.489 | 6.652 | 7.915 | 7.915 | 5.948 |
+| 32 B × 10 pps | slave→master | 20 | 491 | 12.457 | 14.215 | 17.026 | 17.668 | 17.668 | 3.537 |
+| 64 B × 100 pps | master→slave | 100 | 7925 | 5.635 | 5.984 | 6.667 | 6.805 | 6.889 | 2.262 |
+| 64 B × 100 pps | slave→master | 100 | 7916 | 6.837 | 11.423 | 16.651 | 16.884 | 17.941 | 2.145 |
+
+前置 clean baseline 为辅助证据；绑定 production 身份的物理矩阵和同目录 post-diagnostics
+为最终权威证据：
+
+- `build/board-e2e/20260809T173037.882030759Z-uart-921600-clean-baseline/summary.json`；
+- `build/board-e2e/20260809T181038.231814402Z-physical-uart-921600-production-bound/summary.json`；
+- 同目录 `post-diagnostics.json`。
+
+post-diagnostics 显示两板各 `uart_rx_bytes=uart_tx_bytes=8840`、各 120 条 record
+queued/completed，pending/busy/aborted/rejected、UART drop/restart/start error、queue
+drop、record drop、invalid group/session 和 sync error 全为 0；master `active_count=1`、
+slave `sync_state=2/LOCKED`，两板仍从默认值取得 921600。master 的 RF retry telemetry
+为 `radio_retry_count=89`、`radio_retry_exhausted=21`，但没有对应 bridge record 丢失、
+CRC/SHA 不一致或队列 drop；该计数反映 ESB 传输尝试，不改变本轮物理 bridge exact 结论。
+
+夹具调试过程中保留两次失败证据：第一次因旧 adb 对超长 shell command 限制失败，第二次
+因一次性 adb 启动的 570--600 ms RTT 造成负校准延时；改为 staged worker 和持久 PING/PONG
+后才执行最终 PASS。失败目录为 `build/board-e2e/20260809T171326.969075394Z-physical-uart-921600-final/`
+和 `build/board-e2e/20260809T171828.610638437Z-physical-uart-921600-final/`，不作为产品失败
+或成功证据。

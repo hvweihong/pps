@@ -35,7 +35,8 @@ README 在既有“两部分”结构内同步更新，不新增章节。Kconfig
 2. 构建 production 与 validation 固件。
 3. 在两板 validation 固件上执行 `param clear uart_baudrate` 和 cold reboot，要求两板均报告
    `uart_baudrate = 921600 (default, reboot)`。
-4. 运行双板无线/CDC 最终门禁，要求 slave `LOCKED`、双向 payload 精确、零重试/恢复/drop/error。
+4. 运行双板无线/CDC 最终门禁，要求 slave `LOCKED`、双向 payload 精确、零 flash
+   retry/recovery 和 queue/UART/time-UART drop/error。
 5. 烧录 production 固件，将 `/dev/ttyACM2` 和 adb `/dev/ttyS1` 配置为 921600 8N1，至少抽测
    32-byte/10 pps 与 64-byte/100 pps 的双向独立帧，校验 CRC/SHA 并记录延时
    min/P50/P95/P99/max。
