@@ -48,8 +48,12 @@ if ! rg -UPq 'case RB_ACTION_SEND_DOWNLINK_BROADCAST:[\s\S]*?radio_transport_sen
 fi
 rg -q '^CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION=y$' "$loss_conf"
 rg -q 'SHELL_CMD_ARG\(loss,' "$validation_shell"
+rg -q 'SHELL_CMD_ARG\(loss_once,' "$validation_shell"
 rg -q 'SHELL_CMD\(loss_off,' "$validation_shell"
 rg -q 'radio_transport_loss_set' "$validation_shell"
+rg -q 'radio_transport_loss_once' "$validation_shell"
+rg -q 'radio_transport_loss_drop_count' "$validation_shell"
+rg -q 'loss_drop_limit|loss_drop_count' "$src"
 rg -q 'queue_injected_tx_success\(\)' "$src"
 if ! rg -UPq 'if \(loss_type_mask != 0u &&\s*\n\s*\(loss_type_mask & \(1u << frame_type\)\) == 0u\) \{\s*\n\s*return false;' "$src"; then
     echo "loss cadence must count only matching frame types" >&2

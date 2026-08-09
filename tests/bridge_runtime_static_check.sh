@@ -9,6 +9,18 @@ grep -q 'K_MSGQ_DEFINE' "${FILE}"
 grep -q 'radio_transport_get_event' "${FILE}"
 grep -q 'uart_bridge_read' "${FILE}"
 grep -q 'uart_bridge_write' "${FILE}"
+grep -q 'uart_bridge_write_record' "${FILE}"
+grep -q 'uart_bridge_record_available' "${FILE}"
+grep -q 'rb_scheduler_master_peek_record' "${FILE}"
+grep -q 'rb_scheduler_master_pop_record' "${FILE}"
+if grep -q 'rb_scheduler_master_read_uart' "${FILE}"; then
+	echo "master runtime must not destructively read merged UART bytes" >&2
+	exit 1
+fi
+if ! grep -Pzq 'rb_scheduler_master_peek_record[\s\S]*uart_bridge_write_record[\s\S]*rb_scheduler_master_pop_record' "${FILE}"; then
+	echo "master record must be peeked, accepted by UART, then popped" >&2
+	exit 1
+fi
 grep -q 'rb_scheduler_next_action' "${FILE}"
 grep -q 'rb_scheduler_uart_available' "${FILE}"
 for token in sync_pair_count sync_tracker_wait_count sync_tracker_error_count \

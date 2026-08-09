@@ -63,11 +63,33 @@ void status_log_bridge(void)
 		bridge.sync_age_us);
 	LOG_INF("bridge_status uart_rx_bytes=%llu uart_tx_bytes=%llu "
 		"uart_rx_drop_bytes=%llu uart_tx_drop_bytes=%llu "
-		"uart_rx_restart_errors=%u",
+		"uart_rx_restart_errors=%u uart_record_queued=%llu "
+		"uart_record_completed=%llu uart_record_aborted=%llu "
+		"uart_record_rejected=%llu uart_record_pending=%u "
+		"uart_record_busy=%u uart_start_errors=%u",
 		(unsigned long long)uart->rx_bytes,
 		(unsigned long long)uart->tx_bytes,
 		(unsigned long long)uart->rx_drop_bytes,
-		(unsigned long long)uart->tx_drop_bytes, uart->rx_restart_errors);
+		(unsigned long long)uart->tx_drop_bytes, uart->rx_restart_errors,
+		(unsigned long long)uart->tx_record_queued,
+		(unsigned long long)uart->tx_record_completed,
+		(unsigned long long)uart->tx_record_aborted,
+		(unsigned long long)uart->tx_record_rejected,
+		uart->tx_record_pending, uart->tx_record_busy,
+		uart->tx_start_errors);
+	LOG_INF("bridge_records node1_records=%llu node1_bytes=%llu "
+		"node1_record_drop=%llu node2_records=%llu node2_bytes=%llu "
+		"node2_record_drop=%llu node3_records=%llu node3_bytes=%llu "
+		"node3_record_drop=%llu",
+		(unsigned long long)bridge.node_record_count[0],
+		(unsigned long long)bridge.node_record_bytes[0],
+		(unsigned long long)bridge.node_record_drop[0],
+		(unsigned long long)bridge.node_record_count[1],
+		(unsigned long long)bridge.node_record_bytes[1],
+		(unsigned long long)bridge.node_record_drop[1],
+		(unsigned long long)bridge.node_record_count[2],
+		(unsigned long long)bridge.node_record_bytes[2],
+		(unsigned long long)bridge.node_record_drop[2]);
 	LOG_INF("time_uart rx_bytes=%llu rx_drop_bytes=%llu lines=%u "
 		"overlong_line_drops=%u output_line_drops=%u "
 		"rx_restart_errors=%u rx_buffer_errors=%u rx_stopped_events=%u "

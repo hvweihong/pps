@@ -542,6 +542,8 @@ ZTEST(master_scheduler, test_uplink_payload_is_delivered_once_and_acknowledged)
 	struct rb_poll poll;
 	uint8_t wire[RB_ESB_MAX_PAYLOAD];
 	uint8_t received[sizeof(payload)];
+	uint8_t node_id;
+	size_t record_len;
 	size_t wire_len;
 
 	init_master();
@@ -550,9 +552,12 @@ ZTEST(master_scheduler, test_uplink_payload_is_delivered_once_and_acknowledged)
 	event.wire = wire;
 	event.wire_len = wire_len;
 	rb_scheduler_on_radio_event(&core, &event, 1);
-	zassert_equal(rb_scheduler_master_read_uart(&core, received,
-						 sizeof(received)), sizeof(payload));
+	zassert_ok(rb_scheduler_master_peek_record(&core, &node_id, received,
+						 sizeof(received), &record_len));
+	zassert_equal(node_id, 1u);
+	zassert_equal(record_len, sizeof(payload));
 	zassert_mem_equal(received, payload, sizeof(payload));
+	zassert_ok(rb_scheduler_master_pop_record(&core, node_id));
 	zassert_equal(rb_scheduler_duplicate_count(&core), 0u);
 
 	zassert_ok(rb_scheduler_next_action(&core, 1, &action));
@@ -561,8 +566,9 @@ ZTEST(master_scheduler, test_uplink_payload_is_delivered_once_and_acknowledged)
 	zassert_equal(poll.uplink_ack_base, ack.uplink_sequence);
 
 	rb_scheduler_on_radio_event(&core, &event, 2);
-	zassert_equal(rb_scheduler_master_read_uart(&core, received,
-						 sizeof(received)), 0u);
+	zassert_equal(rb_scheduler_master_peek_record(&core, &node_id, received,
+							 sizeof(received), &record_len),
+		      -EAGAIN);
 	zassert_equal(rb_scheduler_duplicate_count(&core), 1u);
 }
 

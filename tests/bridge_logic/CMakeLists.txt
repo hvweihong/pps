@@ -17,6 +17,7 @@ target_sources(app PRIVATE
 	src/test_config.c
 	src/test_link_protocol.c
 	src/test_byte_ring.c
+	src/test_record_queue.c
 	src/test_bridge_validation.c
 	src/test_link_window.c
 	src/test_membership.c
@@ -31,6 +32,7 @@ target_sources(app PRIVATE
 	../../src/bridge_config.c
 	../../src/link_protocol.c
 	../../src/byte_ring.c
+	../../src/record_queue.c
 	../../src/bridge_validation.c
 	../../src/link_window.c
 	../../src/membership.c

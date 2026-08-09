@@ -124,7 +124,10 @@ static void radio_boot_diagnostic_begin(enum rb_radio_profile profile)
 static uint32_t loss_type_mask;
 static uint32_t loss_every_n;
 static uint32_t loss_counter;
-static bool loss_injector_should_drop(uint8_t frame_type)
+static uint32_t loss_drop_limit;
+static uint32_t loss_drop_count;
+static size_t loss_minimum_length;
+static bool loss_injector_should_drop(uint8_t frame_type, size_t frame_length)
 {
 	if (frame_type >= 32u) {
 		return false;
@@ -136,8 +139,18 @@ static bool loss_injector_should_drop(uint8_t frame_type)
 	if (loss_every_n == 0u) {
 		return loss_type_mask != 0u;
 	}
+	if (frame_length < loss_minimum_length) {
+		return false;
+	}
+	if (loss_drop_limit != 0u && loss_drop_count >= loss_drop_limit) {
+		return false;
+	}
 	loss_counter++;
-	return (loss_counter % loss_every_n) == 0u;
+	if ((loss_counter % loss_every_n) != 0u) {
+		return false;
+	}
+	loss_drop_count++;
+	return true;
 }
 
 static int queue_injected_tx_success(void)
@@ -158,6 +171,24 @@ void radio_transport_loss_set(uint32_t type_mask, uint32_t every_n)
 	loss_type_mask = type_mask;
 	loss_every_n = every_n;
 	loss_counter = 0u;
+	loss_drop_limit = 0u;
+	loss_drop_count = 0u;
+	loss_minimum_length = 0u;
+}
+
+void radio_transport_loss_once(uint32_t type_mask, size_t minimum_length)
+{
+	loss_type_mask = type_mask;
+	loss_every_n = 1u;
+	loss_counter = 0u;
+	loss_drop_limit = 1u;
+	loss_drop_count = 0u;
+	loss_minimum_length = minimum_length;
+}
+
+uint32_t radio_transport_loss_drop_count(void)
+{
+	return loss_drop_count;
 }
 #endif /* CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION */
 
@@ -205,7 +236,8 @@ static void rb_esb_event_handler(const struct esb_evt *event)
 			memcpy(queued.data, payload.data, queued.length);
 #ifdef CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION
 			if (queued.length >= 4 &&
-			    loss_injector_should_drop(queued.data[3])) {
+				    loss_injector_should_drop(queued.data[3],
+							      queued.length)) {
 				continue;
 			}
 #endif
@@ -404,7 +436,7 @@ int radio_transport_send(uint8_t pipe, bool no_ack,
 	radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_SEND, 0);
 #ifdef CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION
 	/* byte 3 is the frame type in the "RB" common header */
-	if (len >= 4 && loss_injector_should_drop(payload.data[3])) {
+	if (len >= 4 && loss_injector_should_drop(payload.data[3], len)) {
 		return queue_injected_tx_success();
 	}
 #endif

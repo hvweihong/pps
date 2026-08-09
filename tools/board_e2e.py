@@ -34,6 +34,7 @@ BOOT_GUARD_CLEAR_TIMEOUT_S = 30.0
 HISTORY_MAX_BYTES = 256 * 1024
 MASTER_TO_SLAVE_SEED = 49
 SLAVE_TO_MASTER_SEED = 114
+UPLINK_ACK_LOSS_SEED = 213
 
 
 class GateError(RuntimeError):
@@ -560,6 +561,122 @@ def _bridge_stat_value(output: str, field: str) -> int:
     return int(matches[-1])
 
 
+MASTER_RECORD_DIAGNOSTIC_FIELDS = (
+    "node1_records",
+    "node1_bytes",
+    "node1_record_drop",
+    "uart_record_queued",
+    "uart_record_completed",
+    "uart_record_aborted",
+    "uart_record_rejected",
+    "uart_record_pending",
+    "uart_record_busy",
+    "uart_start_errors",
+)
+
+
+def _master_record_diagnostic_values(output: str) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for field in MASTER_RECORD_DIAGNOSTIC_FIELDS:
+        matches = re.findall(rf"\b{field}=(\d+)\b", output)
+        if not matches:
+            raise GateError(f"master: record diagnostic field is missing: {field}")
+        values[field] = int(matches[-1])
+    return values
+
+
+def _require_master_record_diagnostics(
+    output: str,
+    *,
+    expected_bytes: int,
+    board: str,
+    minimum_records: int = 1,
+) -> dict[str, int]:
+    values = _master_record_diagnostic_values(output)
+    if values["node1_records"] < minimum_records:
+        raise GateError(
+            f"{board}: node1_records={values['node1_records']}, "
+            f"expected at least {minimum_records}"
+        )
+    if values["node1_bytes"] != expected_bytes:
+        raise GateError(
+            f"{board}: node1_bytes={values['node1_bytes']}, "
+            f"expected {expected_bytes}"
+        )
+    for field in (
+        "node1_record_drop",
+        "uart_record_rejected",
+        "uart_record_pending",
+        "uart_record_busy",
+        "uart_start_errors",
+    ):
+        if values[field] != 0:
+            raise GateError(f"{board}: {field}={values[field]}, expected zero")
+    if values["uart_record_queued"] != values["uart_record_completed"]:
+        raise GateError(
+            f"{board}: UART record queue is not idle: "
+            f"queued={values['uart_record_queued']} "
+            f"completed={values['uart_record_completed']}"
+        )
+    if values["uart_record_queued"] != values["node1_records"]:
+        raise GateError(
+            f"{board}: UART/node record attribution differs: "
+            f"queued={values['uart_record_queued']} "
+            f"node1={values['node1_records']}"
+        )
+    return values
+
+
+def _wait_for_master_record_diagnostics(
+    master: BoardSession,
+    *,
+    expected_bytes: int,
+    minimum_records: int,
+) -> dict[str, int]:
+    deadline = time.monotonic() + max(STATUS_TIMEOUT_S, master.command_timeout * 3.0)
+    last_output = ""
+    while time.monotonic() < deadline:
+        last_output = master.command("bridge_test stats")
+        values = _master_record_diagnostic_values(last_output)
+        for field in (
+            "node1_record_drop",
+            "uart_record_rejected",
+            "uart_start_errors",
+        ):
+            if values[field] != 0:
+                raise GateError(f"master: {field}={values[field]}, expected zero")
+        if values["node1_bytes"] > expected_bytes:
+            raise GateError(
+                f"master: node1_bytes={values['node1_bytes']} exceeded "
+                f"expected {expected_bytes}"
+            )
+        if (
+            values["node1_bytes"] == expected_bytes
+            and values["node1_records"] >= minimum_records
+            and values["uart_record_pending"] == 0
+            and values["uart_record_busy"] == 0
+            and values["uart_record_queued"] == values["uart_record_completed"]
+        ):
+            checked = _require_master_record_diagnostics(
+                last_output,
+                expected_bytes=expected_bytes,
+                board=master.label,
+                minimum_records=minimum_records,
+            )
+            master.event(
+                "master record diagnostics PASS "
+                f"node1_records={checked['node1_records']} "
+                f"node1_bytes={checked['node1_bytes']} "
+                f"uart_aborted={checked['uart_record_aborted']}"
+            )
+            return checked
+        time.sleep(0.05)
+    raise GateError(
+        "master: timed out waiting for record/UART idle diagnostics: "
+        f"{last_output[-512:]}"
+    )
+
+
 def _wait_for_fresh_runtime_zero_drops(board: BoardSession) -> None:
     history_mark = board.history_mark()
     deadline = time.monotonic() + max(STATUS_TIMEOUT_S, board.command_timeout * 3.0)
@@ -666,6 +783,15 @@ def _run_bidirectional_bridge_gate(
     master.clear_history()
     slave.clear_history()
 
+    baseline_output = master.command("bridge_test stats")
+    baseline = _master_record_diagnostic_values(baseline_output)
+    _require_master_record_diagnostics(
+        baseline_output,
+        expected_bytes=baseline["node1_bytes"],
+        board=master.label,
+        minimum_records=baseline["node1_records"],
+    )
+
     command = f"bridge_test inject {bridge_length} {MASTER_TO_SLAVE_SEED}"
     output = master.command(command)
     _expect(
@@ -685,6 +811,11 @@ def _run_bidirectional_bridge_gate(
         command,
     )
     _wait_for_verify(master, bridge_length, SLAVE_TO_MASTER_SEED, f"{label}-slave-to-master")
+    _wait_for_master_record_diagnostics(
+        master,
+        expected_bytes=baseline["node1_bytes"] + bridge_length,
+        minimum_records=baseline["node1_records"] + 1,
+    )
 
     for board in (master, slave):
         stats = board.command("bridge_test stats")
@@ -791,6 +922,78 @@ def _run_downlink_loss_gate(
     )
 
 
+def _run_uplink_ack_loss_once_gate(
+    master: BoardSession,
+    slave: BoardSession,
+    bridge_length: int,
+) -> None:
+    for board in (master, slave):
+        output = board.command("bridge_test clear")
+        _expect(output, "bridge_test clear ok", board.label, "bridge_test clear")
+
+    baseline_output = master.command("bridge_test stats")
+    baseline = _master_record_diagnostic_values(baseline_output)
+    _require_master_record_diagnostics(
+        baseline_output,
+        expected_bytes=baseline["node1_bytes"],
+        board=master.label,
+        minimum_records=baseline["node1_records"],
+    )
+
+    command = "bridge_test loss_once 7"
+    output = slave.command(command)
+    _expect(
+        output,
+        "bridge_test loss_once ok mask=0x00000080 min_len=23",
+        slave.label,
+        command,
+    )
+    try:
+        command = f"bridge_test inject {bridge_length} {UPLINK_ACK_LOSS_SEED}"
+        output = slave.command(command)
+        _expect(
+            output,
+            f"bridge_test inject ok len={bridge_length} seed={UPLINK_ACK_LOSS_SEED}",
+            slave.label,
+            command,
+        )
+        _wait_for_verify(
+            master,
+            bridge_length,
+            UPLINK_ACK_LOSS_SEED,
+            "single-ack-loss-slave-to-master",
+        )
+        slave_stats = slave.command("bridge_test stats")
+        if _bridge_stat_value(slave_stats, "loss_dropped") != 1:
+            raise GateError("slave: one-shot ACK_UPLINK loss was not observed")
+        master_diag = _wait_for_master_record_diagnostics(
+            master,
+            expected_bytes=baseline["node1_bytes"] + bridge_length,
+            minimum_records=baseline["node1_records"] + 1,
+        )
+        master_stats = master.command("bridge_test stats")
+        if _bridge_stat_value(master_stats, "output") != 0:
+            raise GateError("master: duplicate payload remained after exact verify")
+    finally:
+        output = slave.command("bridge_test loss_off")
+        _expect(
+            output,
+            "bridge_test loss_off ok mask=0x00000000 every_n=0",
+            slave.label,
+            "bridge_test loss_off",
+        )
+
+    for board in (master, slave):
+        stats = board.command("bridge_test stats")
+        _require_zero_drops(stats, board.label)
+        _wait_for_fresh_runtime_zero_drops(board)
+    master.event(
+        "uplink ACK one-shot loss gate PASS "
+        f"frame_type=7 dropped=1 node1_bytes={master_diag['node1_bytes']}"
+    )
+    slave.event("uplink ACK one-shot loss gate PASS frame_type=7 dropped=1")
+
+
 def _run_cold_reboot_cycles(
     master: BoardSession, slave: BoardSession, cycles: int, bridge_length: int
 ) -> None:
@@ -844,6 +1047,7 @@ def _run_cycle(
     cycle: int,
     cycles: int,
     bridge_length: int,
+    bridge_repeats: int,
 ) -> None:
     master.event(f"cycle={cycle}/{cycles} start")
     slave.event(f"cycle={cycle}/{cycles} start")
@@ -864,7 +1068,13 @@ def _run_cycle(
 
     _wait_for_radio_ready(master, slave)
 
-    _run_bidirectional_bridge_gate(master, slave, bridge_length, f"cycle-{cycle}")
+    for repeat in range(1, bridge_repeats + 1):
+        _run_bidirectional_bridge_gate(
+            master,
+            slave,
+            bridge_length,
+            f"cycle-{cycle}-repeat-{repeat}",
+        )
     for board in (master, slave):
         board.event(f"cycle={cycle}/{cycles} PASS")
 
@@ -887,10 +1097,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--bridge-length", type=int, default=600)
     parser.add_argument(
+        "--bridge-repeats",
+        type=int,
+        default=1,
+        help="Bidirectional bridge repetitions per flash cycle",
+    )
+    parser.add_argument(
         "--downlink-loss-every-n",
         type=int,
         default=0,
         help="Run best-effort downlink loss gate; 0 disables, otherwise use N >= 2",
+    )
+    parser.add_argument(
+        "--uplink-ack-loss-once",
+        action="store_true",
+        help="Drop one non-empty ACK_UPLINK and verify exact retry delivery",
     )
     parser.add_argument("--command-timeout", type=float, default=10.0)
     return parser
@@ -919,6 +1140,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             raise GateError(
                 f"--bridge-length must be in [1, {BRIDGE_MAX_LENGTH}]"
             )
+        if args.bridge_repeats < 1:
+            raise GateError("--bridge-repeats must be >= 1")
         if args.downlink_loss_every_n < 0 or args.downlink_loss_every_n == 1:
             raise GateError("--downlink-loss-every-n must be 0 or >= 2")
         if args.command_timeout <= 0:
@@ -945,7 +1168,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         )
         try:
             for cycle in range(1, args.cycles + 1):
-                _run_cycle(master, slave, cycle, args.cycles, args.bridge_length)
+                _run_cycle(
+                    master,
+                    slave,
+                    cycle,
+                    args.cycles,
+                    args.bridge_length,
+                    args.bridge_repeats,
+                )
             if args.downlink_loss_every_n:
                 _run_downlink_loss_gate(
                     master,
@@ -953,6 +1183,8 @@ def main(argv: Iterable[str] | None = None) -> int:
                     args.bridge_length,
                     args.downlink_loss_every_n,
                 )
+            if args.uplink_ack_loss_once:
+                _run_uplink_ack_loss_once_gate(master, slave, args.bridge_length)
             if args.cold_reboots_per_board:
                 _run_cold_reboot_cycles(
                     master, slave, args.cold_reboots_per_board, args.bridge_length
@@ -964,7 +1196,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(
                 "BOARD_E2E PASS "
                 f"stage={args.stage} cycles={args.cycles} length={args.bridge_length} "
+                f"bridge_repeats={args.bridge_repeats} "
                 f"downlink_loss_every_n={args.downlink_loss_every_n} "
+                f"uplink_ack_loss_once={int(args.uplink_ack_loss_once)} "
                 f"cold_reboots_per_board={args.cold_reboots_per_board} "
                 f"master_flashes={master.flash_count} slave_flashes={slave.flash_count} "
                 f"master_flash_retries={master.flash_retry_count} "

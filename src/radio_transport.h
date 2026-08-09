@@ -131,6 +131,8 @@ void radio_transport_set_wake_callback(rb_radio_transport_wake_fn cb);
  * values to drop; every_n drops one in every N frames of matching type.
  * Pass 0,0 to disable.  Never call from production code paths. */
 void radio_transport_loss_set(uint32_t type_mask, uint32_t every_n);
+void radio_transport_loss_once(uint32_t type_mask, size_t minimum_length);
+uint32_t radio_transport_loss_drop_count(void);
 #endif
 
 #endif /* RADIO_TRANSPORT_H_ */

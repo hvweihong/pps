@@ -8,6 +8,7 @@
 #include "link_protocol.h"
 #include "link_window.h"
 #include "membership.h"
+#include "record_queue.h"
 
 enum rb_scheduler_action_type {
 	RB_ACTION_NONE,
@@ -72,6 +73,9 @@ struct rb_scheduler_time_publication {
 #define RB_SCHEDULER_DEFAULT_DOWNLINK_EPOCH 1u
 #define RB_SCHEDULER_DEFAULT_UPLINK_EPOCH 1u
 #define RB_SCHEDULER_DEFAULT_IDLE_POLL_US 1000u
+#define RB_SCHEDULER_RECORD_LENGTH_CAPACITY \
+	((RB_SCHEDULER_UART_QUEUE_SIZE + RB_ACK_UPLINK_PAYLOAD_MAX - 1u) / \
+	 RB_ACK_UPLINK_PAYLOAD_MAX)
 
 struct rb_scheduler_peer_runtime {
 	uint32_t next_poll_due_us;
@@ -155,9 +159,15 @@ struct rb_scheduler_core {
 	uint8_t slave_uplink_queue[RB_SCHEDULER_UART_QUEUE_SIZE];
 	uint16_t slave_uplink_head;
 	uint16_t slave_uplink_count;
-	uint8_t master_rx_queue[RB_SCHEDULER_UART_QUEUE_SIZE];
-	uint16_t master_rx_head;
-	uint16_t master_rx_count;
+	struct rb_record_queue master_record_queue[RB_SCHEDULER_MAX_PEERS];
+	uint8_t master_record_storage[RB_SCHEDULER_MAX_PEERS]
+		[RB_SCHEDULER_UART_QUEUE_SIZE];
+	uint16_t master_record_lengths[RB_SCHEDULER_MAX_PEERS]
+		[RB_SCHEDULER_RECORD_LENGTH_CAPACITY];
+	uint64_t master_record_drop_count[RB_SCHEDULER_MAX_PEERS];
+	uint8_t master_record_cursor;
+	uint8_t master_record_peek_node;
+	bool master_record_peek_valid;
 	uint64_t queue_drop_bytes;
 	uint64_t duplicate_rx_count;
 	uint64_t downlink_gap_count;
@@ -213,7 +223,12 @@ int rb_scheduler_reset_session(struct rb_scheduler_core *core,
 			       uint32_t master_session);
 size_t rb_scheduler_slave_read_uart(struct rb_scheduler_core *core,
 					uint8_t *data, size_t max_len);
-size_t rb_scheduler_master_read_uart(struct rb_scheduler_core *core,
-					 uint8_t *data, size_t max_len);
+int rb_scheduler_master_peek_record(struct rb_scheduler_core *core,
+				    uint8_t *node_id, uint8_t *data,
+				    size_t max_len, size_t *record_len);
+int rb_scheduler_master_pop_record(struct rb_scheduler_core *core,
+				   uint8_t node_id);
+uint64_t rb_scheduler_master_record_drop_count(
+	const struct rb_scheduler_core *core, uint8_t node_id);
 
 #endif /* LINK_SCHEDULER_CORE_H_ */

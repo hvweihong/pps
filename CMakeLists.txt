@@ -20,6 +20,7 @@ target_include_directories(app PRIVATE src)
 target_sources(app PRIVATE
 	src/bridge_config.c
 	src/byte_ring.c
+	src/record_queue.c
 	src/link_protocol.c
 	src/link_window.c
 	src/membership.c

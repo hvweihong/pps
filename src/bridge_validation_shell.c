@@ -5,6 +5,7 @@
 
 #include "bridge_runtime.h"
 #include "radio_transport.h"
+#include "uart_bridge.h"
 
 static int parse_uint(const char *text, unsigned long maximum,
 		      unsigned long *value)
@@ -102,21 +103,41 @@ static int cmd_bridge_test_stats(const struct shell *shell, size_t argc,
 {
 	struct rb_validation_stats stats;
 	struct rb_bridge_stats bridge;
+	const struct rb_uart_stats *uart;
+	uint32_t loss_dropped = 0u;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	bridge_runtime_validation_stats_get(&stats);
 	bridge_runtime_stats_get(&bridge);
+	uart = uart_bridge_stats_get();
+#if defined(CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION)
+	loss_dropped = radio_transport_loss_drop_count();
+#endif
 	shell_print(shell, "bridge_test stats input=%zu output=%zu injected=%llu "
 		    "captured=%llu input_drop=%llu output_drop=%llu "
-		    "downlink_gap=%llu downlink_duplicate=%llu",
+		    "downlink_gap=%llu downlink_duplicate=%llu "
+		    "node1_records=%llu node1_bytes=%llu node1_record_drop=%llu "
+		    "uart_record_queued=%llu uart_record_completed=%llu "
+		    "uart_record_aborted=%llu uart_record_rejected=%llu "
+		    "uart_record_pending=%u uart_record_busy=%u uart_start_errors=%u "
+		    "loss_dropped=%u",
 		    stats.input_bytes, stats.output_bytes,
 		    (unsigned long long)stats.injected_bytes,
 		    (unsigned long long)stats.captured_bytes,
 		    (unsigned long long)stats.input_drop_bytes,
 		    (unsigned long long)stats.output_drop_bytes,
 		    (unsigned long long)bridge.downlink_gap_packets,
-		    (unsigned long long)bridge.downlink_duplicate_packets);
+		    (unsigned long long)bridge.downlink_duplicate_packets,
+		    (unsigned long long)bridge.node_record_count[0],
+		    (unsigned long long)bridge.node_record_bytes[0],
+		    (unsigned long long)bridge.node_record_drop[0],
+		    (unsigned long long)uart->tx_record_queued,
+		    (unsigned long long)uart->tx_record_completed,
+		    (unsigned long long)uart->tx_record_aborted,
+		    (unsigned long long)uart->tx_record_rejected,
+		    uart->tx_record_pending, uart->tx_record_busy,
+		    uart->tx_start_errors, loss_dropped);
 	return 0;
 }
 
@@ -148,6 +169,27 @@ static int cmd_bridge_test_loss_off(const struct shell *shell, size_t argc,
 	ARG_UNUSED(argv);
 	radio_transport_loss_set(0u, 0u);
 	shell_print(shell, "bridge_test loss_off ok mask=0x00000000 every_n=0");
+	return 0;
+}
+
+static int cmd_bridge_test_loss_once(const struct shell *shell, size_t argc,
+				     char **argv)
+{
+	unsigned long frame_type;
+	uint32_t type_mask;
+
+	if (argc != 2u || parse_uint(argv[1], 31u, &frame_type) != 0 ||
+	    frame_type == 0u) {
+		shell_error(shell, "usage: bridge_test loss_once <1..31>");
+		return -EINVAL;
+	}
+	type_mask = 1u << frame_type;
+	radio_transport_loss_once(type_mask,
+		frame_type == RB_FRAME_ACK_UPLINK ? RB_ACK_UPLINK_HEADER_SIZE + 1u : 0u);
+	shell_print(shell, "bridge_test loss_once ok mask=0x%08x min_len=%u",
+		    type_mask,
+		    frame_type == RB_FRAME_ACK_UPLINK ?
+			RB_ACK_UPLINK_HEADER_SIZE + 1u : 0u);
 	return 0;
 }
 #endif
@@ -223,6 +265,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_bridge_test,
 #if defined(CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION)
 	SHELL_CMD_ARG(loss, NULL, "Drop frame type at cadence: <type> <every_n>",
 		      cmd_bridge_test_loss, 3, 0),
+	SHELL_CMD_ARG(loss_once, NULL, "Drop the next matching frame: <type>",
+		      cmd_bridge_test_loss_once, 2, 0),
 	SHELL_CMD(loss_off, NULL, "Disable radio packet loss injection",
 		  cmd_bridge_test_loss_off),
 #endif

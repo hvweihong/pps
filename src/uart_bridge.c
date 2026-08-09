@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 
 #include "byte_ring.h"
+#include "record_queue.h"
 
 #if !DT_NODE_HAS_STATUS(DT_ALIAS(bridge_uart), okay)
 #error "bridge-uart alias is required"
@@ -18,21 +19,23 @@
 #define RB_UART_DEVICE DT_ALIAS(bridge_uart)
 #define RB_UART_RX_BUFFER_SIZE 512u
 #define RB_UART_TX_BUFFER_SIZE 512u
+#define RB_UART_TX_RECORD_CAPACITY 64u
 
 static const struct device *const uart_dev = DEVICE_DT_GET(RB_UART_DEVICE);
 static uint8_t rx_dma_buf[2][RB_UART_RX_BUFFER_SIZE];
 static uint8_t tx_dma_buf[RB_UART_TX_BUFFER_SIZE];
 static uint8_t rx_storage[CONFIG_RADIO_BRIDGE_UART_RING_SIZE];
 static uint8_t tx_storage[CONFIG_RADIO_BRIDGE_UART_RING_SIZE];
+static uint16_t tx_record_lengths[RB_UART_TX_RECORD_CAPACITY];
 static struct rb_byte_ring rx_ring;
-static struct rb_byte_ring tx_ring;
+static struct rb_record_queue tx_record_queue;
 static struct rb_uart_stats stats;
 static struct rb_uart_stats stats_snapshot;
 static struct k_spinlock state_lock;
 static bool tx_busy;
-static size_t tx_inflight_len;
+static bool tx_record_loaded;
+static size_t tx_record_len;
 static size_t tx_dma_offset;
-static bool tx_retry_active;
 static uint8_t next_rx_buffer;
 static rb_uart_bridge_wake_fn wake_callback;
 
@@ -45,36 +48,44 @@ static rb_uart_bridge_wake_fn wake_callback;
  */
 static void start_pending_tx_locked(void)
 {
-	size_t n;
+	size_t record_len;
+	size_t remaining;
 	int err;
 
 	if (tx_busy) {
 		return;
 	}
-	if (tx_retry_active) {
-		n = tx_inflight_len;
-		err = uart_tx(uart_dev, tx_dma_buf + tx_dma_offset, n, 0);
-	} else {
-		n = rb_byte_ring_peek(&tx_ring, tx_dma_buf, sizeof(tx_dma_buf));
-		if (n == 0u) {
+	if (!tx_record_loaded) {
+		err = rb_record_queue_peek(&tx_record_queue, tx_dma_buf,
+					   sizeof(tx_dma_buf), &record_len);
+		if (err == -EAGAIN) {
 			return;
 		}
-		/* uart_tx() is non-blocking; remove only bytes handed to EasyDMA. */
-		err = uart_tx(uart_dev, tx_dma_buf, n, 0);
-		if (err == 0) {
-			(void)rb_byte_ring_discard(&tx_ring, n);
+		if (err != 0) {
+			stats.tx_start_errors++;
+			return;
 		}
+		tx_record_loaded = true;
+		tx_record_len = record_len;
+		tx_dma_offset = 0u;
 	}
+	remaining = tx_record_len - tx_dma_offset;
+	err = uart_tx(uart_dev, tx_dma_buf + tx_dma_offset, remaining, 0);
 	if (err == 0) {
 		tx_busy = true;
-		tx_inflight_len = n;
-	} else if (!tx_retry_active) {
-		tx_inflight_len = 0u;
+	} else {
+		stats.tx_start_errors++;
 	}
-	if (err != 0 && tx_retry_active) {
-		/* Keep retry bytes for a later uart_bridge_write() attempt. */
-		tx_busy = false;
+}
+
+static void complete_tx_record_locked(void)
+{
+	if (rb_record_queue_pop(&tx_record_queue) == 0) {
+		stats.tx_record_completed++;
 	}
+	tx_record_loaded = false;
+	tx_record_len = 0u;
+	tx_dma_offset = 0u;
 }
 
 static void capture_rx_locked(const uint8_t *data, size_t len)
@@ -143,26 +154,38 @@ static void uart_callback(const struct device *dev, struct uart_event *event,
 		}
 		break;
 	case UART_TX_DONE:
+	{
+		k_spinlock_key_t key = k_spin_lock(&state_lock);
+
+		tx_busy = false;
+		complete_tx_record_locked();
+		start_pending_tx_locked();
+		k_spin_unlock(&state_lock, key);
+		if (wake_callback != NULL) {
+			wake_callback();
+		}
+	}
+		break;
 	case UART_TX_ABORTED:
 	{
 		k_spinlock_key_t key = k_spin_lock(&state_lock);
+		size_t remaining = tx_record_len - tx_dma_offset;
 		size_t sent = event->data.tx.len;
 
-		if (sent > tx_inflight_len) {
-			sent = tx_inflight_len;
+		if (sent > remaining) {
+			sent = remaining;
 		}
 		tx_busy = false;
-		if (event->type == UART_TX_ABORTED && sent < tx_inflight_len) {
-			tx_dma_offset += sent;
-			tx_inflight_len -= sent;
-			tx_retry_active = true;
-		} else {
-			tx_dma_offset = 0u;
-			tx_inflight_len = 0u;
-			tx_retry_active = false;
+		tx_dma_offset += sent;
+		stats.tx_record_aborted++;
+		if (tx_dma_offset == tx_record_len) {
+			complete_tx_record_locked();
 		}
 		start_pending_tx_locked();
 		k_spin_unlock(&state_lock, key);
+		if (wake_callback != NULL) {
+			wake_callback();
+		}
 	}
 		break;
 	default:
@@ -185,13 +208,14 @@ int uart_bridge_init(void)
 		return -ENODEV;
 	}
 	rb_byte_ring_init(&rx_ring, rx_storage, sizeof(rx_storage));
-	rb_byte_ring_init(&tx_ring, tx_storage, sizeof(tx_storage));
+	rb_record_queue_init(&tx_record_queue, tx_storage, sizeof(tx_storage),
+			     tx_record_lengths, RB_UART_TX_RECORD_CAPACITY);
 	memset(&stats, 0, sizeof(stats));
 	memset(&stats_snapshot, 0, sizeof(stats_snapshot));
 	tx_busy = false;
-	tx_inflight_len = 0u;
+	tx_record_loaded = false;
+	tx_record_len = 0u;
 	tx_dma_offset = 0u;
-	tx_retry_active = false;
 	/* RX buffer zero is passed to uart_rx_enable below; buffer one is next. */
 	next_rx_buffer = 1u;
 	err = uart_configure(uart_dev, &config);
@@ -218,20 +242,70 @@ size_t uart_bridge_read(uint8_t *data, size_t max_len)
 
 size_t uart_bridge_write(const uint8_t *data, size_t len)
 {
-	size_t written;
+	size_t written = 0u;
 
 	if (data == NULL || len == 0u) {
 		return 0u;
 	}
-	{
-		k_spinlock_key_t key = k_spin_lock(&state_lock);
-		written = rb_byte_ring_write(&tx_ring, data, len);
-		stats.tx_bytes += written;
-		stats.tx_drop_bytes = tx_ring.dropped_bytes;
-		start_pending_tx_locked();
-		k_spin_unlock(&state_lock, key);
+	while (written < len) {
+		size_t available = uart_bridge_record_available();
+		size_t chunk_len = len - written;
+
+		if (available == 0u) {
+			break;
+		}
+		if (chunk_len > available) {
+			chunk_len = available;
+		}
+		if (uart_bridge_write_record(data + written, chunk_len) != 0) {
+			break;
+		}
+		written += chunk_len;
 	}
 	return written;
+}
+
+int uart_bridge_write_record(const uint8_t *data, size_t len)
+{
+	int ret;
+
+	if (data == NULL || len == 0u) {
+		return -EINVAL;
+	}
+	if (len > sizeof(tx_dma_buf)) {
+		return -EMSGSIZE;
+	}
+	{
+		k_spinlock_key_t key = k_spin_lock(&state_lock);
+
+		ret = rb_record_queue_push(&tx_record_queue, data, len);
+		if (ret == 0) {
+			stats.tx_bytes += len;
+			stats.tx_record_queued++;
+			start_pending_tx_locked();
+		} else if (ret == -ENOSPC) {
+			stats.tx_record_rejected++;
+		}
+		k_spin_unlock(&state_lock, key);
+	}
+	return ret;
+}
+
+size_t uart_bridge_record_available(void)
+{
+	size_t available;
+	k_spinlock_key_t key = k_spin_lock(&state_lock);
+
+	if (tx_record_queue.length_count == tx_record_queue.length_capacity) {
+		available = 0u;
+	} else {
+		available = tx_record_queue.storage_size - tx_record_queue.data_count;
+		if (available > sizeof(tx_dma_buf)) {
+			available = sizeof(tx_dma_buf);
+		}
+	}
+	k_spin_unlock(&state_lock, key);
+	return available;
 }
 
 void uart_bridge_set_wake_callback(rb_uart_bridge_wake_fn cb)
@@ -244,8 +318,9 @@ const struct rb_uart_stats *uart_bridge_stats_get(void)
 	k_spinlock_key_t key = k_spin_lock(&state_lock);
 
 	stats.rx_drop_bytes = rx_ring.dropped_bytes;
-	stats.tx_drop_bytes = tx_ring.dropped_bytes;
 	stats_snapshot = stats;
+	stats_snapshot.tx_record_pending = tx_record_queue.length_count;
+	stats_snapshot.tx_record_busy = tx_busy ? 1u : 0u;
 	k_spin_unlock(&state_lock, key);
 	return &stats_snapshot;
 }

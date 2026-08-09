@@ -1,5 +1,6 @@
 import importlib
 import io
+import re
 import subprocess
 import sys
 import tempfile
@@ -277,6 +278,37 @@ class ShellOutputTests(unittest.TestCase):
             output = " ".join(field for field in fields if field != missing)
             with self.subTest(field=missing), self.assertRaises(board_e2e.GateError):
                 require_runtime_zero(output, "master")
+
+    def test_master_record_diagnostics_require_exact_bytes_and_idle_uart(self):
+        board_e2e = load_board_e2e()
+        require_record_diag = require_symbol(
+            board_e2e, "_require_master_record_diagnostics"
+        )
+        output = (
+            "node1_records=5 node1_bytes=600 node1_record_drop=0 "
+            "uart_record_queued=5 uart_record_completed=5 "
+            "uart_record_aborted=1 uart_record_rejected=0 "
+            "uart_record_pending=0 uart_record_busy=0 uart_start_errors=0"
+        )
+
+        require_record_diag(output, expected_bytes=600, board="master")
+
+        for replacement in (
+            "node1_bytes=599",
+            "node1_record_drop=1",
+            "uart_record_completed=4",
+            "uart_record_rejected=1",
+            "uart_record_pending=1",
+            "uart_record_busy=1",
+            "uart_start_errors=1",
+        ):
+            broken = output
+            field = replacement.split("=", 1)[0]
+            broken = re.sub(rf"{field}=\d+", replacement, broken)
+            with self.subTest(replacement=replacement), self.assertRaises(
+                board_e2e.GateError
+            ):
+                require_record_diag(broken, expected_bytes=600, board="master")
 
 
 class RecoveryFlashTests(unittest.TestCase):
@@ -803,6 +835,39 @@ class RawLogTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_bridge_repeats_option_is_parsed(self):
+        board_e2e = load_board_e2e()
+        args = board_e2e.build_parser().parse_args(
+            [
+                "--stage",
+                "stage6",
+                "--master-uf2",
+                "master.uf2",
+                "--slave-uf2",
+                "slave.uf2",
+                "--bridge-repeats",
+                "5",
+            ]
+        )
+
+        self.assertEqual(args.bridge_repeats, 5)
+
+    def test_uplink_ack_loss_once_option_is_parsed(self):
+        board_e2e = load_board_e2e()
+        args = board_e2e.build_parser().parse_args(
+            [
+                "--stage",
+                "stage6",
+                "--master-uf2",
+                "master.uf2",
+                "--slave-uf2",
+                "slave.uf2",
+                "--uplink-ack-loss-once",
+            ]
+        )
+
+        self.assertTrue(args.uplink_ack_loss_once)
+
     def test_downlink_loss_cadence_option_is_parsed(self):
         board_e2e = load_board_e2e()
         args = board_e2e.build_parser().parse_args(

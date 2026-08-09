@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "link_protocol.h"
 #include "sync_filter.h"
 
 #if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
@@ -21,6 +22,9 @@ struct rb_bridge_stats {
 	uint64_t downlink_duplicate_packets;
 	uint64_t invalid_session_packets;
 	uint64_t queue_drop_bytes;
+	uint64_t node_record_count[RB_MAX_SOURCE_NODE];
+	uint64_t node_record_bytes[RB_MAX_SOURCE_NODE];
+	uint64_t node_record_drop[RB_MAX_SOURCE_NODE];
 	uint64_t discovery_hello_count;
 	uint64_t sync_rx_count;
 	uint64_t sync_missed_count;

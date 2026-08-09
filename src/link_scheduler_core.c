@@ -674,6 +674,13 @@ void rb_scheduler_init(struct rb_scheduler_core *core,
 	core->next_sync_tick = core->config.sync_interval_us;
 	rb_membership_init(&core->membership, core->config.master_session,
 			   core->config.lease_timeout_us);
+	for (size_t i = 0u; i < RB_SCHEDULER_MAX_PEERS; i++) {
+		rb_record_queue_init(&core->master_record_queue[i],
+				     core->master_record_storage[i],
+				     sizeof(core->master_record_storage[i]),
+				     core->master_record_lengths[i],
+				     RB_SCHEDULER_RECORD_LENGTH_CAPACITY);
+	}
 	rb_slave_lease_init(&core->slave_lease, core->config.lease_timeout_us);
 }
 
@@ -1096,12 +1103,16 @@ void rb_scheduler_on_radio_event(struct rb_scheduler_core *core,
 				}
 			rb_membership_note_success(&core->membership, node_id, now_us);
 			if (ack.payload_len != 0u && !duplicate) {
-				runtime->uplink_ack_base = ack.uplink_sequence;
-				(void)queue_append(core->master_rx_queue,
-						   &core->master_rx_head,
-						   &core->master_rx_count, ack.payload,
-						   ack.payload_len,
-						   &core->queue_drop_bytes);
+				int ret = rb_record_queue_push(
+					&core->master_record_queue[node_id - 1u],
+					ack.payload, ack.payload_len);
+
+				if (ret == 0) {
+					runtime->uplink_ack_base = ack.uplink_sequence;
+				} else {
+					core->master_record_drop_count[node_id - 1u]++;
+					core->queue_drop_bytes += ack.payload_len;
+				}
 			}
 		}
 	}
@@ -1254,8 +1265,16 @@ int rb_scheduler_reset_session(struct rb_scheduler_core *core,
 	core->in_flight_type = RB_ACTION_NONE;
 	core->queued_broadcast = false;
 	clear_uart(core);
-	core->master_rx_head = 0u;
-	core->master_rx_count = 0u;
+	for (size_t i = 0u; i < RB_SCHEDULER_MAX_PEERS; i++) {
+		rb_record_queue_init(&core->master_record_queue[i],
+				     core->master_record_storage[i],
+				     sizeof(core->master_record_storage[i]),
+				     core->master_record_lengths[i],
+				     RB_SCHEDULER_RECORD_LENGTH_CAPACITY);
+	}
+	core->master_record_cursor = 0u;
+	core->master_record_peek_node = 0u;
+	core->master_record_peek_valid = false;
 	core->slave_active = false;
 	rb_slave_lease_init(&core->slave_lease, core->config.lease_timeout_us);
 	core->slave_hello_pending = false;
@@ -1300,18 +1319,65 @@ size_t rb_scheduler_slave_read_uart(struct rb_scheduler_core *core,
 	return n;
 }
 
-size_t rb_scheduler_master_read_uart(struct rb_scheduler_core *core,
-					 uint8_t *data, size_t max_len)
+int rb_scheduler_master_peek_record(struct rb_scheduler_core *core,
+				    uint8_t *node_id, uint8_t *data,
+				    size_t max_len, size_t *record_len)
 {
-	size_t n;
-	if (core == NULL || data == NULL || max_len == 0u) {
+	if (core == NULL || !core->config.master || node_id == NULL || data == NULL ||
+	    max_len == 0u || record_len == NULL) {
+		return -EINVAL;
+	}
+	if (core->master_record_peek_valid) {
+		*node_id = core->master_record_peek_node;
+		return rb_record_queue_peek(
+			&core->master_record_queue[*node_id - 1u], data, max_len,
+			record_len);
+	}
+	for (size_t i = 0u; i < RB_SCHEDULER_MAX_PEERS; i++) {
+		uint8_t candidate = (uint8_t)(
+			((core->master_record_cursor + i) % RB_SCHEDULER_MAX_PEERS) + 1u);
+		int ret = rb_record_queue_peek(
+			&core->master_record_queue[candidate - 1u], data, max_len,
+			record_len);
+
+		if (ret == -EAGAIN) {
+			continue;
+		}
+		if (ret != 0) {
+			return ret;
+		}
+		core->master_record_peek_node = candidate;
+		core->master_record_peek_valid = true;
+		*node_id = candidate;
+		return 0;
+	}
+	return -EAGAIN;
+}
+
+int rb_scheduler_master_pop_record(struct rb_scheduler_core *core,
+				   uint8_t node_id)
+{
+	int ret;
+
+	if (core == NULL || !core->config.master || !node_valid(node_id) ||
+	    !core->master_record_peek_valid ||
+	    node_id != core->master_record_peek_node) {
+		return -EINVAL;
+	}
+	ret = rb_record_queue_pop(&core->master_record_queue[node_id - 1u]);
+	if (ret == 0) {
+		core->master_record_cursor = node_id % RB_SCHEDULER_MAX_PEERS;
+		core->master_record_peek_node = 0u;
+		core->master_record_peek_valid = false;
+	}
+	return ret;
+}
+
+uint64_t rb_scheduler_master_record_drop_count(
+	const struct rb_scheduler_core *core, uint8_t node_id)
+{
+	if (core == NULL || !node_valid(node_id)) {
 		return 0u;
 	}
-	n = core->master_rx_count < max_len ? core->master_rx_count : max_len;
-	for (size_t i = 0; i < n; i++) {
-		data[i] = core->master_rx_queue[(core->master_rx_head + i) %
-			RB_SCHEDULER_UART_QUEUE_SIZE];
-	}
-	queue_discard(&core->master_rx_head, &core->master_rx_count, n);
-	return n;
+	return core->master_record_drop_count[node_id - 1u];
 }

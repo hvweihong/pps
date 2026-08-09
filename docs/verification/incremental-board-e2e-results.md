@@ -649,3 +649,55 @@ frame type 计数；主动丢弃 TX 时向 runtime 排入 synthetic TX-success�
 
 本阶段实板证明单 slave 下 best-effort 下行的丢包前进、可靠上行独立性与关闭注入后的恢复。
 多 slave 的上行 record 隔离属于 Stage 6；外部 PPS/GNSS 与 `<=20 us` 相位测量边界保持不变。
+
+## Stage 6 — Per-slave uplink records and record-aware UART TX
+
+执行日期：2026-08-09。基线为 Stage 5 提交 `1851768`。本阶段将 master 的单一上行字节队列
+替换为每 node 独立的 bounded record queue；ACK_UPLINK payload 只有在整条入队成功后才推进
+该 node 的 `uplink_ack_base`。runtime 先 peek node record，UART 描述符整条接收后才 capture CDC
+并 pop scheduler record；描述符满时保留 scheduler record，UART abort 只重试未发送后缀。
+
+### Host/build evidence
+
+- record queue 与 master round-robin TDD：整条 push/peek/pop、容量不足时不修改旧记录、
+  node1/node2/node1 读取不拼接。
+- bridge native suite：**124/124 PASS**，其中 record queue 新增 3/3 PASS。
+- Python board/flash suite：**51/51 PASS**；全部 active static checks、`ruff` 与
+  `git diff --check` PASS。
+- validation + loss build：FLASH `179544 B`、RAM `192692 B`（73.51%）、UF2 `359424 B`，
+  SHA-256 `78831fc611753bacbd67cb320d5f39f688cc94ef76e588dcaf8c38be2e308c29`。
+- validation 新增 `node1_records/node1_bytes/node1_record_drop` 与 UART record
+  queued/completed/aborted/rejected/pending/busy/start-error 诊断；`bridge_test loss_once 7`
+  只丢下一条非空 ACK_UPLINK，并报告实际 drop count。
+
+### Dual-board hardware gate
+
+为减少重复刷写，同一次 fixed-ID flash 后通过 `--bridge-repeats 5` 连续验证五轮：
+
+```sh
+/usr/bin/timeout 300s /home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage6-record-uart-short \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage6-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage6-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-repeats 5 --bridge-length 600 \
+  --uplink-ack-loss-once --command-timeout 10
+```
+
+- **`BOARD_E2E PASS`** after 55.4 s；两板各 flash 一次，零 flash retry、零 command
+  recovery。
+- 五轮 master→slave 与 slave→master 各 600-byte exact verify 全部 PASS；master 每轮收到
+  node1 的 3 条 record，累计 `node1_records=15`、`node1_bytes=3000`。
+- 每轮结束 UART record `queued=completed`、`pending=0`、`busy=0`、`aborted=0`，node1、UART、
+  validation、time-UART 与 scheduler queue drop 全为 0。
+- slave 一次性丢弃 1 条非空 ACK_UPLINK（type 7）后，额外 600-byte pattern 仍 exact verify；
+  master 最终 `node1_records=18`、`node1_bytes=3600`，CDC output 无残留重复 payload。
+- Authoritative raw evidence：
+  `build/board-e2e/20260809T094249.807445Z-stage6-record-uart-short/master.raw.log`、
+  `build/board-e2e/20260809T094249.807445Z-stage6-record-uart-short/slave.raw.log`。
+
+### Verification boundary
+
+双板实测证明单物理 slave 的 record attribution、完整 UART descriptor draining 与一次 ACK_UPLINK
+丢失恢复；三 slave 的独立 round-robin/不拼接由 native test 覆盖。当前没有第二、第三块 slave，
+因此不把多物理 slave 并发宣称为板级实测；外部 PPS/GNSS 和 `<=20 us` 相位边界保持不变。

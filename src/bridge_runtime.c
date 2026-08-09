@@ -434,25 +434,56 @@ static void runtime_pull_validation_rx(void)
 static void runtime_push_uart_tx(void)
 {
 	uint8_t data[256];
-	size_t len;
-	do {
-		if (scheduler.config.master) {
-			len = rb_scheduler_master_read_uart(&scheduler, data,
-								 sizeof(data));
-		} else {
-			len = rb_scheduler_slave_read_uart(&scheduler, data,
-								 sizeof(data));
-		}
-		if (len != 0u) {
+
+	if (scheduler.config.master) {
+		for (;;) {
+			uint8_t node_id;
+			size_t record_len;
+			int ret = rb_scheduler_master_peek_record(
+				&scheduler, &node_id, data, sizeof(data), &record_len);
+
+			if (ret != 0) {
+				return;
+			}
+			ret = uart_bridge_write_record(data, record_len);
+			if (ret != 0) {
+				return;
+			}
 		#if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
 			k_spinlock_key_t key = k_spin_lock(&validation_lock);
 
-			(void)rb_validation_capture_output(&validation_pipe, data, len);
+			(void)rb_validation_capture_output(&validation_pipe, data,
+						   record_len);
 			k_spin_unlock(&validation_lock, key);
 		#endif
-			(void)uart_bridge_write(data, len);
+			if (rb_scheduler_master_pop_record(&scheduler, node_id) != 0) {
+				return;
+			}
+			if (node_id >= 1u && node_id <= RB_MAX_SOURCE_NODE) {
+				bridge_stats.node_record_count[node_id - 1u]++;
+				bridge_stats.node_record_bytes[node_id - 1u] += record_len;
+			}
 		}
-	} while (len == sizeof(data));
+	}
+	for (;;) {
+		size_t available = uart_bridge_record_available();
+		size_t max_len = available < sizeof(data) ? available : sizeof(data);
+		size_t len;
+
+		if (max_len == 0u) {
+			return;
+		}
+		len = rb_scheduler_slave_read_uart(&scheduler, data, max_len);
+		if (len == 0u || uart_bridge_write_record(data, len) != 0) {
+			return;
+		}
+	#if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
+		k_spinlock_key_t key = k_spin_lock(&validation_lock);
+
+		(void)rb_validation_capture_output(&validation_pipe, data, len);
+		k_spin_unlock(&validation_lock, key);
+	#endif
+	}
 }
 
 static int runtime_execute_action(struct rb_scheduler_action *action)
@@ -1013,6 +1044,10 @@ void bridge_runtime_stats_get(struct rb_bridge_stats *stats)
 	stats->active_count = rb_scheduler_active_count(&scheduler);
 	stats->suspect_count = rb_membership_suspect_count(&scheduler.membership);
 	stats->queue_drop_bytes = rb_scheduler_queue_drop_bytes(&scheduler);
+	for (uint8_t node_id = 1u; node_id <= RB_MAX_SOURCE_NODE; node_id++) {
+		stats->node_record_drop[node_id - 1u] =
+			rb_scheduler_master_record_drop_count(&scheduler, node_id);
+	}
 	stats->duplicate_packets = rb_scheduler_duplicate_count(&scheduler);
 	stats->downlink_gap_packets =
 		rb_scheduler_downlink_gap_count(&scheduler);
