@@ -84,20 +84,3 @@ int heartbeat_led_start(bool enabled, uint32_t period_ms)
 	LOG_INF("heartbeat LED enabled=%u period=%ums", enabled, period_ms);
 	return 0;
 }
-
-int heartbeat_led_update(bool enabled, uint32_t period_ms)
-{
-	if (!started) {
-		return -EAGAIN;
-	}
-	if (period_ms == 0u) {
-		return -EINVAL;
-	}
-
-	atomic_set(&heartbeat_period_ms, period_ms);
-	atomic_set(&heartbeat_enabled, enabled);
-	if (!enabled) {
-		gpio_pin_set_dt(&led, false);
-	}
-	return 0;
-}

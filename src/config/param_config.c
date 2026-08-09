@@ -49,115 +49,7 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 			.max = 3,
 			.default_value = 0,
 		},
-		.nvs_id = 0x0FFF,
-	},
-	[RB_PARAM_UART_BAUDRATE] = {
-		.name = "uart_baudrate",
-		.description = "Data UART baud rate",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 1200,
-			.max = 3000000,
-			.default_value = CONFIG_RADIO_BRIDGE_UART_BAUDRATE,
-		},
 		.nvs_id = 0x1000,
-	},
-	[RB_PARAM_UART_RING_SIZE] = {
-		.name = "uart_ring_size",
-		.description = "Bytes in each data UART ring",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = CONFIG_RADIO_BRIDGE_UART_RING_SIZE,
-			.max = CONFIG_RADIO_BRIDGE_UART_RING_SIZE,
-			.default_value = CONFIG_RADIO_BRIDGE_UART_RING_SIZE,
-		},
-		.nvs_id = 0x1001,
-	},
-	[RB_PARAM_AGGREGATION_TIMEOUT_US] = {
-		.name = "aggregation_timeout_us",
-		.description = "Partial radio payload aggregation timeout",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 100,
-			.max = 10000,
-			.default_value = CONFIG_RADIO_BRIDGE_AGGREGATION_TIMEOUT_US,
-		},
-		.nvs_id = 0x1002,
-	},
-	[RB_PARAM_SYNC_INTERVAL_US] = {
-		.name = "sync_interval_us",
-		.description = "Wireless sync/discovery interval",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 10000,
-			.max = 1000000,
-			.default_value = CONFIG_RADIO_BRIDGE_SYNC_INTERVAL_US,
-		},
-		.nvs_id = 0x1003,
-	},
-	[RB_PARAM_RESPONSE_SLOT_COUNT] = {
-		.name = "response_slot_count",
-		.description = "Discovery response slots",
-		.type = RB_PARAM_UINT8,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u8 = {
-			.min = 1,
-			.max = 32,
-			.default_value = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_COUNT,
-		},
-		.nvs_id = 0x1004,
-	},
-	[RB_PARAM_RESPONSE_SLOT_US] = {
-		.name = "response_slot_us",
-		.description = "Discovery response slot width",
-		.type = RB_PARAM_UINT16,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u16 = {
-			.min = 100,
-			.max = 5000,
-			.default_value = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_US,
-		},
-		.nvs_id = 0x1005,
-	},
-	[RB_PARAM_ASSIGNMENT_WINDOW_US] = {
-		.name = "assignment_window_us",
-		.description = "Assignment receive window",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 1000,
-			.max = 50000,
-			.default_value = CONFIG_RADIO_BRIDGE_ASSIGNMENT_WINDOW_US,
-		},
-		.nvs_id = 0x1006,
-	},
-	[RB_PARAM_LEASE_TIMEOUT_US] = {
-		.name = "lease_timeout_us",
-		.description = "Lease timeout without valid poll",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 10000,
-			.max = 1000000,
-			.default_value = CONFIG_RADIO_BRIDGE_LEASE_TIMEOUT_US,
-		},
-		.nvs_id = 0x1007,
-	},
-	[RB_PARAM_IDLE_POLL_MAX_US] = {
-		.name = "idle_poll_max_us",
-		.description = "Maximum idle poll interval",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 1000,
-			.max = 10000,
-			.default_value = CONFIG_RADIO_BRIDGE_IDLE_POLL_MAX_US,
-		},
-		.nvs_id = 0x1008,
 	},
 	[RB_PARAM_GROUP_ID] = {
 		.name = "group_id",
@@ -169,7 +61,7 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 			.max = 0xFFFFFFFE,
 			.default_value = CONFIG_RADIO_BRIDGE_GROUP_ID,
 		},
-		.nvs_id = 0x1009,
+		.nvs_id = 0x1001,
 	},
 	[RB_PARAM_GROUP_KEY] = {
 		.name = "group_key",
@@ -180,93 +72,19 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 			.length = 16,
 			.default_value = default_group_key,
 		},
-		.nvs_id = 0x100A,
+		.nvs_id = 0x1002,
 	},
-	[RB_PARAM_PPS_PERIOD_US] = {
-		.name = "pps_period_us",
-		.description = "PPS period in microseconds",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 1000000,
-			.max = 1000000,
-			.default_value = CONFIG_TIME_SYNC_PPS_PERIOD_US,
-		},
-		.nvs_id = 0x100B,
-	},
-	[RB_PARAM_PPS_WIDTH_US] = {
-		.name = "pps_width_us",
-		.description = "PPS pulse width in microseconds",
-		.type = RB_PARAM_UINT32,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u32 = {
-			.min = 10,
-			.max = 500000,
-			.default_value = CONFIG_TIME_SYNC_PPS_WIDTH_US,
-		},
-		.nvs_id = 0x100C,
-	},
-	[RB_PARAM_RADIO_DELAY_US] = {
-		.name = "radio_delay_us",
-		.description = "Calibrated slave radio delay (us)",
-		.type = RB_PARAM_UINT16,
-		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
-		.config.u16 = {
-			.min = 0,
-			.max = 1000,
-			.default_value = CONFIG_TIME_SYNC_RADIO_DELAY_US,
-		},
-		.nvs_id = 0x100D,
-	},
-	[RB_PARAM_STATUS_INTERVAL_MS] = {
-		.name = "status_interval_ms",
-		.description = "Status log interval in milliseconds",
-		.type = RB_PARAM_UINT16,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
-		.config.u16 = {
-			.min = 100,
-			.max = 10000,
-			.default_value = CONFIG_TIME_SYNC_STATUS_INTERVAL_MS,
-		},
-		.nvs_id = 0x100E,
-	},
-	[RB_PARAM_LED_HEARTBEAT] = {
-		.name = "led_heartbeat",
-		.description = "Enable LED heartbeat blinking",
-		.type = RB_PARAM_BOOL,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
-		.config.boolean = {
-			.default_value = IS_ENABLED(CONFIG_TIME_SYNC_LED_HEARTBEAT),
-		},
-		.nvs_id = 0x100F,
-	},
-	[RB_PARAM_LED_PERIOD_MS] = {
-		.name = "led_period_ms",
-		.description = "LED heartbeat period in milliseconds",
-		.type = RB_PARAM_UINT16,
-		.flags = RB_PARAM_FLAG_RUNTIME_UPDATE,
-		.config.u16 = {
-			.min = 100,
-			.max = 10000,
-#if IS_ENABLED(CONFIG_TIME_SYNC_LED_HEARTBEAT)
-			.default_value = CONFIG_TIME_SYNC_LED_HEARTBEAT_PERIOD_MS,
-#else
-			.default_value = 1000,
-#endif
-		},
-		.nvs_id = 0x1010,
-	},
-	[RB_PARAM_TIME_UART_BAUDRATE] = {
-		.name = "time_uart_baudrate",
-		.description = "External time UART baud rate",
+	[RB_PARAM_UART_BAUDRATE] = {
+		.name = "uart_baudrate",
+		.description = "Data UART baud rate",
 		.type = RB_PARAM_UINT32,
 		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
 		.config.u32 = {
 			.min = 1200,
-			.max = 115200,
-			.default_value = CONFIG_TIME_UART_BAUDRATE,
+			.max = 3000000,
+			.default_value = CONFIG_RADIO_BRIDGE_UART_BAUDRATE,
 		},
-		.nvs_id = 0x1012,
+		.nvs_id = 0x1003,
 	},
 	[RB_PARAM_TIME_SOURCE_MODE] = {
 		.name = "time_source_mode",
@@ -278,7 +96,19 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 			.max = 1,
 			.default_value = 0,
 		},
-		.nvs_id = 0x1011,
+		.nvs_id = 0x1004,
+	},
+	[RB_PARAM_TIME_UART_BAUDRATE] = {
+		.name = "time_uart_baudrate",
+		.description = "External time UART baud rate",
+		.type = RB_PARAM_UINT32,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
+		.config.u32 = {
+			.min = 1200,
+			.max = 115200,
+			.default_value = CONFIG_TIME_UART_BAUDRATE,
+		},
+		.nvs_id = 0x1005,
 	},
 	[RB_PARAM_PPS_INPUT_DELAY_US] = {
 		.name = "pps_input_delay_us",
@@ -290,7 +120,19 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 			.max = 1000,
 			.default_value = 0,
 		},
-		.nvs_id = 0x1013,
+		.nvs_id = 0x1006,
+	},
+	[RB_PARAM_RADIO_DELAY_US] = {
+		.name = "radio_delay_us",
+		.description = "Calibrated slave radio delay (us)",
+		.type = RB_PARAM_UINT16,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
+		.config.u16 = {
+			.min = 0,
+			.max = 1000,
+			.default_value = CONFIG_TIME_SYNC_RADIO_DELAY_US,
+		},
+		.nvs_id = 0x1007,
 	},
 };
 
@@ -306,8 +148,6 @@ static uint32_t param_get_default(enum rb_param_id id)
 		return desc->config.u16.default_value;
 	case RB_PARAM_UINT8:
 		return desc->config.u8.default_value;
-	case RB_PARAM_BOOL:
-		return desc->config.boolean.default_value ? 1U : 0U;
 	default:
 		return 0;
 	}
@@ -344,8 +184,6 @@ static bool param_validate_range(enum rb_param_id id, uint32_t value)
 		return value >= desc->config.u16.min && value <= desc->config.u16.max;
 	case RB_PARAM_UINT8:
 		return value >= desc->config.u8.min && value <= desc->config.u8.max;
-	case RB_PARAM_BOOL:
-		return value <= 1U;
 	default:
 		return false;
 	}
@@ -355,7 +193,7 @@ static bool param_validate_range(enum rb_param_id id, uint32_t value)
  *
  * The settings framework already strips the handler's own registered name
  * ("params") off the front of the full key before calling this handler, so
- * `name` arrives as just the remainder -- e.g. "0x0fff", not "params/0x0fff".
+ * `name` arrives as just the remainder -- e.g. "0x1000", not "params/0x1000".
  * Re-matching PARAM_NVS_NAMESPACE against that remainder can never succeed. */
 static int param_settings_set(const char *name, size_t len, settings_read_cb read_cb,
 			      void *cb_arg)
@@ -475,24 +313,6 @@ int rb_param_get_uint32(enum rb_param_id id, uint32_t *value)
 	return 0;
 }
 
-int rb_param_get_bool(enum rb_param_id id, bool *value)
-{
-	if (id >= RB_PARAM_COUNT || value == NULL) {
-		return -EINVAL;
-	}
-
-	if (rb_param_table[id].type != RB_PARAM_BOOL) {
-		return -EINVAL;
-	}
-
-	if (!initialized) {
-		return -EAGAIN;
-	}
-
-	*value = (param_cache[id].data.value != 0);
-	return 0;
-}
-
 int rb_param_get_bytes(enum rb_param_id id, uint8_t *buffer, size_t *length)
 {
 	if (id >= RB_PARAM_COUNT || buffer == NULL || length == NULL) {
@@ -558,19 +378,6 @@ int rb_param_set_uint32(enum rb_param_id id, uint32_t value)
 
 	LOG_INF("Set %s = %u", rb_param_table[id].name, value);
 	return 0;
-}
-
-int rb_param_set_bool(enum rb_param_id id, bool value)
-{
-	if (id >= RB_PARAM_COUNT) {
-		return -EINVAL;
-	}
-
-	if (rb_param_table[id].type != RB_PARAM_BOOL) {
-		return -EINVAL;
-	}
-
-	return rb_param_set_uint32(id, value ? 1U : 0U);
 }
 
 int rb_param_set_bytes(enum rb_param_id id, const uint8_t *buffer, size_t length)

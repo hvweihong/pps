@@ -8,7 +8,6 @@
 #define PARAM_DEFS_H_
 
 #include <stdint.h>
-#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -22,7 +21,6 @@ enum rb_param_type {
 	RB_PARAM_UINT8,
 	RB_PARAM_UINT16,
 	RB_PARAM_UINT32,
-	RB_PARAM_BOOL,
 	RB_PARAM_BYTES,
 };
 
@@ -32,7 +30,6 @@ enum rb_param_type {
 enum rb_param_flags {
 	RB_PARAM_FLAG_NONE = 0,
 	RB_PARAM_FLAG_REBOOT_REQUIRED = (1 << 0),  /**< Requires reboot to take effect */
-	RB_PARAM_FLAG_RUNTIME_UPDATE = (1 << 1),    /**< Can be updated at runtime */
 };
 
 /**
@@ -60,9 +57,6 @@ struct rb_param_descriptor {
 			uint8_t default_value;
 		} u8;
 		struct {
-			bool default_value;
-		} boolean;
-		struct {
 			size_t length;
 			const uint8_t *default_value;
 		} bytes;
@@ -75,26 +69,13 @@ struct rb_param_descriptor {
  */
 enum rb_param_id {
 	RB_PARAM_ROLE_ID = 0,
-	RB_PARAM_UART_BAUDRATE,
-	RB_PARAM_UART_RING_SIZE,
-	RB_PARAM_AGGREGATION_TIMEOUT_US,
-	RB_PARAM_SYNC_INTERVAL_US,
-	RB_PARAM_RESPONSE_SLOT_COUNT,
-	RB_PARAM_RESPONSE_SLOT_US,
-	RB_PARAM_ASSIGNMENT_WINDOW_US,
-	RB_PARAM_LEASE_TIMEOUT_US,
-	RB_PARAM_IDLE_POLL_MAX_US,
 	RB_PARAM_GROUP_ID,
 	RB_PARAM_GROUP_KEY,
-	RB_PARAM_PPS_PERIOD_US,
-	RB_PARAM_PPS_WIDTH_US,
-	RB_PARAM_RADIO_DELAY_US,
-	RB_PARAM_STATUS_INTERVAL_MS,
-	RB_PARAM_LED_HEARTBEAT,
-	RB_PARAM_LED_PERIOD_MS,
-	RB_PARAM_TIME_UART_BAUDRATE,
+	RB_PARAM_UART_BAUDRATE,
 	RB_PARAM_TIME_SOURCE_MODE,
+	RB_PARAM_TIME_UART_BAUDRATE,
 	RB_PARAM_PPS_INPUT_DELAY_US,
+	RB_PARAM_RADIO_DELAY_US,
 	RB_PARAM_COUNT  /**< Total parameter count */
 };
 

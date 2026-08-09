@@ -30,8 +30,8 @@ bool rb_param_persistence_available(void);
 /**
  * @brief Get parameter value as uint32_t.
  *
- * Works for all numeric types (uint8/uint16/uint32). Bool returns 0/1.
- * Priority: NVS persisted > runtime override > Kconfig default.
+ * Works for all numeric types (uint8/uint16/uint32).
+ * Priority: valid NVS persisted value > compiled default.
  *
  * @param id Parameter identifier
  * @param value Output pointer for parameter value
@@ -40,38 +40,16 @@ bool rb_param_persistence_available(void);
 int rb_param_get_uint32(enum rb_param_id id, uint32_t *value);
 
 /**
- * @brief Get parameter value as bool.
- *
- * Only works for RB_PARAM_BOOL type parameters.
- *
- * @param id Parameter identifier
- * @param value Output pointer for parameter value
- * @return 0 on success, -EINVAL if id is invalid or not boolean type
- */
-int rb_param_get_bool(enum rb_param_id id, bool *value);
-
-/**
  * @brief Set and persist parameter value.
  *
- * Validates range and type, then persists to NVS. Updates runtime
- * value immediately if RB_PARAM_FLAG_RUNTIME_UPDATE is set.
+ * Validates range and type, then persists to NVS. All retained parameters
+ * require a reboot before their consumers observe the new value.
  *
  * @param id Parameter identifier
  * @param value New parameter value
  * @return 0 on success, -EINVAL if out of range, -EIO on NVS error
  */
 int rb_param_set_uint32(enum rb_param_id id, uint32_t value);
-
-/**
- * @brief Set and persist boolean parameter.
- *
- * Only works for RB_PARAM_BOOL type parameters.
- *
- * @param id Parameter identifier
- * @param value New parameter value
- * @return 0 on success, -EINVAL if not boolean type
- */
-int rb_param_set_bool(enum rb_param_id id, bool value);
 
 /**
  * @brief Get parameter value as byte array.
@@ -110,7 +88,7 @@ int rb_param_clear(enum rb_param_id id);
 /**
  * @brief Clear all persisted parameters (factory reset).
  *
- * Removes all parameter entries from NVS. Does NOT clear role config.
+ * Removes all parameter entries from NVS, including role and group settings.
  *
  * @return 0 on success, negative errno on failure
  */

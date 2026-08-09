@@ -162,6 +162,22 @@ static void param_config_before(void *fixture)
 
 ZTEST_SUITE(param_config, NULL, param_config_setup, param_config_before, NULL, NULL);
 
+ZTEST(param_config, test_only_deployment_parameters_are_persistent)
+{
+	static const char *const expected_names[] = {
+		"role_id", "group_id", "group_key", "uart_baudrate",
+		"time_source_mode", "time_uart_baudrate",
+		"pps_input_delay_us", "radio_delay_us",
+	};
+
+	zassert_equal(RB_PARAM_COUNT, ARRAY_SIZE(expected_names));
+	for (size_t i = 0; i < ARRAY_SIZE(expected_names); i++) {
+		zassert_equal(strcmp(rb_param_table[i].name, expected_names[i]), 0);
+		zassert_equal(rb_param_table[i].nvs_id, 0x1000u + i);
+		zassert_true(rb_param_requires_reboot((enum rb_param_id)i));
+	}
+}
+
 ZTEST(param_config, test_init)
 {
 	/* Reset nvs_initialized and call settings_subsys_init explicitly */
@@ -185,15 +201,6 @@ ZTEST(param_config, test_get_default_values)
 	ret = rb_param_get_uint32(RB_PARAM_UART_BAUDRATE, &value);
 	zassert_equal(ret, 0, "Get should succeed");
 	zassert_equal(value, 115200, "Should return compiled UART default");
-
-	/* Aggregation timeout */
-	ret = rb_param_get_uint32(RB_PARAM_AGGREGATION_TIMEOUT_US, &value);
-	zassert_equal(ret, 0, "Get should succeed");
-	zassert_equal(value, 1000, "Should return compiled aggregation default");
-
-	ret = rb_param_get_uint32(RB_PARAM_PPS_WIDTH_US, &value);
-	zassert_ok(ret);
-	zassert_equal(value, 100000, "PPS pulse width defaults to 100 ms");
 
 	zassert_ok(rb_param_get_uint32(RB_PARAM_TIME_SOURCE_MODE, &value));
 	zassert_equal(value, 0, "Local time source is the reboot default");
@@ -290,14 +297,14 @@ ZTEST(param_config, test_reset_all)
 
 	/* Set multiple parameters */
 	rb_param_set_uint32(RB_PARAM_UART_BAUDRATE, 115200);
-	rb_param_set_uint32(RB_PARAM_AGGREGATION_TIMEOUT_US, 5000);
-	rb_param_set_uint32(RB_PARAM_SYNC_INTERVAL_US, 50000);
+	rb_param_set_uint32(RB_PARAM_GROUP_ID, 2);
+	rb_param_set_uint32(RB_PARAM_RADIO_DELAY_US, 10);
 
 	zassert_true(rb_param_is_persisted(RB_PARAM_UART_BAUDRATE),
 		     "Should be persisted");
-	zassert_true(rb_param_is_persisted(RB_PARAM_AGGREGATION_TIMEOUT_US),
+	zassert_true(rb_param_is_persisted(RB_PARAM_GROUP_ID),
 		     "Should be persisted");
-	zassert_true(rb_param_is_persisted(RB_PARAM_SYNC_INTERVAL_US),
+	zassert_true(rb_param_is_persisted(RB_PARAM_RADIO_DELAY_US),
 		     "Should be persisted");
 
 	/* Reset all */
@@ -307,26 +314,10 @@ ZTEST(param_config, test_reset_all)
 	/* All should be cleared */
 	zassert_false(rb_param_is_persisted(RB_PARAM_UART_BAUDRATE),
 		      "Should not be persisted");
-	zassert_false(rb_param_is_persisted(RB_PARAM_AGGREGATION_TIMEOUT_US),
+	zassert_false(rb_param_is_persisted(RB_PARAM_GROUP_ID),
 		      "Should not be persisted");
-	zassert_false(rb_param_is_persisted(RB_PARAM_SYNC_INTERVAL_US),
+	zassert_false(rb_param_is_persisted(RB_PARAM_RADIO_DELAY_US),
 		      "Should not be persisted");
-}
-
-ZTEST(param_config, test_requires_reboot)
-{
-	rb_param_config_init();
-
-	/* UART parameters require reboot */
-	zassert_true(rb_param_requires_reboot(RB_PARAM_UART_BAUDRATE),
-		     "UART baudrate requires reboot");
-	zassert_true(rb_param_requires_reboot(RB_PARAM_UART_RING_SIZE),
-		     "UART ring size requires reboot");
-	zassert_true(rb_param_requires_reboot(RB_PARAM_TIME_UART_BAUDRATE),
-		     "time UART baudrate requires reboot");
-
-	zassert_true(rb_param_requires_reboot(RB_PARAM_AGGREGATION_TIMEOUT_US));
-	zassert_true(rb_param_requires_reboot(RB_PARAM_SYNC_INTERVAL_US));
 }
 
 ZTEST(param_config, test_missing_backend_keeps_defaults)
@@ -374,77 +365,6 @@ ZTEST(param_config, test_group_key_set_get_round_trip)
 	zassert_mem_equal(actual, expected, sizeof(expected));
 }
 
-ZTEST(param_config, test_communication_parameters_require_reboot)
-{
-	static const enum rb_param_id reboot_parameters[] = {
-		RB_PARAM_ROLE_ID,
-		RB_PARAM_UART_BAUDRATE,
-		RB_PARAM_UART_RING_SIZE,
-		RB_PARAM_AGGREGATION_TIMEOUT_US,
-		RB_PARAM_SYNC_INTERVAL_US,
-		RB_PARAM_RESPONSE_SLOT_COUNT,
-		RB_PARAM_RESPONSE_SLOT_US,
-		RB_PARAM_ASSIGNMENT_WINDOW_US,
-		RB_PARAM_LEASE_TIMEOUT_US,
-		RB_PARAM_IDLE_POLL_MAX_US,
-		RB_PARAM_GROUP_ID,
-		RB_PARAM_GROUP_KEY,
-		RB_PARAM_PPS_PERIOD_US,
-		RB_PARAM_PPS_WIDTH_US,
-		RB_PARAM_RADIO_DELAY_US,
-		RB_PARAM_TIME_UART_BAUDRATE,
-		RB_PARAM_TIME_SOURCE_MODE,
-		RB_PARAM_PPS_INPUT_DELAY_US,
-	};
-
-	zassert_ok(rb_param_config_init());
-	for (size_t i = 0u; i < ARRAY_SIZE(reboot_parameters); i++) {
-		zassert_true(rb_param_requires_reboot(reboot_parameters[i]),
-			     "parameter %u must require reboot", reboot_parameters[i]);
-	}
-}
-
-ZTEST(param_config, test_only_status_and_led_are_runtime)
-{
-	zassert_ok(rb_param_config_init());
-	for (enum rb_param_id id = 0; id < RB_PARAM_COUNT; id++) {
-		const struct rb_param_descriptor *descriptor = rb_param_get_descriptor(id);
-		bool expected_runtime = id == RB_PARAM_STATUS_INTERVAL_MS ||
-			id == RB_PARAM_LED_HEARTBEAT || id == RB_PARAM_LED_PERIOD_MS;
-
-		zassert_equal((descriptor->flags & RB_PARAM_FLAG_RUNTIME_UPDATE) != 0u,
-			      expected_runtime, "unexpected runtime flag for %u", id);
-	}
-}
-
-ZTEST(param_config, test_fixed_parameters_do_not_advertise_unsupported_values)
-{
-	const struct rb_param_descriptor *ring;
-	const struct rb_param_descriptor *period;
-
-	zassert_ok(rb_param_config_init());
-	ring = rb_param_get_descriptor(RB_PARAM_UART_RING_SIZE);
-	period = rb_param_get_descriptor(RB_PARAM_PPS_PERIOD_US);
-	zassert_equal(ring->config.u32.min, CONFIG_RADIO_BRIDGE_UART_RING_SIZE);
-	zassert_equal(ring->config.u32.max, CONFIG_RADIO_BRIDGE_UART_RING_SIZE);
-	zassert_equal(period->config.u32.min, 1000000u);
-	zassert_equal(period->config.u32.max, 1000000u);
-	zassert_equal(rb_param_set_uint32(RB_PARAM_UART_RING_SIZE, 8192u), -EINVAL);
-	zassert_equal(rb_param_set_uint32(RB_PARAM_PPS_PERIOD_US, 500000u), -EINVAL);
-}
-
-ZTEST(param_config, test_status_interval_stays_below_watchdog_timeout)
-{
-	const struct rb_param_descriptor *status;
-
-	zassert_ok(rb_param_config_init());
-	status = rb_param_get_descriptor(RB_PARAM_STATUS_INTERVAL_MS);
-	zassert_equal(status->config.u16.max, 10000u);
-	zassert_ok(rb_param_set_uint32(RB_PARAM_STATUS_INTERVAL_MS, 10000u));
-	zassert_equal(rb_param_set_uint32(RB_PARAM_STATUS_INTERVAL_MS, 10001u),
-		      -EINVAL);
-}
-
 ZTEST(param_config, test_time_uart_baudrate_range)
 {
 	uint32_t value;
@@ -463,21 +383,6 @@ ZTEST(param_config, test_time_uart_baudrate_range)
 		      "reject above maximum");
 }
 
-ZTEST(param_config, test_external_time_parameter_nvs_ids_are_stable)
-{
-	const struct rb_param_descriptor *time_source;
-	const struct rb_param_descriptor *time_uart;
-	const struct rb_param_descriptor *pps_delay;
-
-	zassert_ok(rb_param_config_init());
-	time_source = rb_param_get_descriptor(RB_PARAM_TIME_SOURCE_MODE);
-	time_uart = rb_param_get_descriptor(RB_PARAM_TIME_UART_BAUDRATE);
-	pps_delay = rb_param_get_descriptor(RB_PARAM_PPS_INPUT_DELAY_US);
-	zassert_equal(time_source->nvs_id, 0x1011);
-	zassert_equal(time_uart->nvs_id, 0x1012);
-	zassert_equal(pps_delay->nvs_id, 0x1013);
-}
-
 ZTEST(param_config, test_get_descriptor)
 {
 	const struct rb_param_descriptor *desc;
@@ -489,7 +394,7 @@ ZTEST(param_config, test_get_descriptor)
 	zassert_equal(strcmp(desc->name, "uart_baudrate"), 0,
 		      "Name should match");
 	zassert_equal(desc->type, RB_PARAM_UINT32, "Type should be uint32");
-	zassert_equal(desc->nvs_id, 0x1000, "NVS ID should match");
+	zassert_equal(desc->nvs_id, 0x1003, "NVS ID should match");
 
 	/* Invalid ID */
 	desc = rb_param_get_descriptor(RB_PARAM_COUNT);
@@ -503,20 +408,16 @@ ZTEST(param_config, test_u8_parameter)
 
 	rb_param_config_init();
 
-	/* RESPONSE_SLOT_COUNT is uint8 */
-	ret = rb_param_set_uint32(RB_PARAM_RESPONSE_SLOT_COUNT, 8);
+	/* role_id is uint8 */
+	ret = rb_param_set_uint32(RB_PARAM_ROLE_ID, 3);
 	zassert_equal(ret, 0, "Set should succeed");
 
-	ret = rb_param_get_uint32(RB_PARAM_RESPONSE_SLOT_COUNT, &value);
+	ret = rb_param_get_uint32(RB_PARAM_ROLE_ID, &value);
 	zassert_equal(ret, 0, "Get should succeed");
-	zassert_equal(value, 8, "Should return correct value");
+	zassert_equal(value, 3, "Should return correct value");
 
-	/* Test range - max is 32 */
-	ret = rb_param_set_uint32(RB_PARAM_RESPONSE_SLOT_COUNT, 33);
+	ret = rb_param_set_uint32(RB_PARAM_ROLE_ID, 4);
 	zassert_equal(ret, -EINVAL, "Should reject out-of-range");
-
-	ret = rb_param_set_uint32(RB_PARAM_RESPONSE_SLOT_COUNT, 0);
-	zassert_equal(ret, -EINVAL, "Should reject below min");
 }
 
 ZTEST(param_config, test_u16_parameter)
@@ -526,20 +427,17 @@ ZTEST(param_config, test_u16_parameter)
 
 	rb_param_config_init();
 
-	/* RESPONSE_SLOT_US is uint16 */
-	ret = rb_param_set_uint32(RB_PARAM_RESPONSE_SLOT_US, 1000);
+	/* radio_delay_us is uint16 */
+	ret = rb_param_set_uint32(RB_PARAM_RADIO_DELAY_US, 1000);
 	zassert_equal(ret, 0, "Set should succeed");
 
-	ret = rb_param_get_uint32(RB_PARAM_RESPONSE_SLOT_US, &value);
+	ret = rb_param_get_uint32(RB_PARAM_RADIO_DELAY_US, &value);
 	zassert_equal(ret, 0, "Get should succeed");
 	zassert_equal(value, 1000, "Should return correct value");
 
 	/* Test range */
-	ret = rb_param_set_uint32(RB_PARAM_RESPONSE_SLOT_US, 6000);
+	ret = rb_param_set_uint32(RB_PARAM_RADIO_DELAY_US, 1001);
 	zassert_equal(ret, -EINVAL, "Should reject above max");
-
-	ret = rb_param_set_uint32(RB_PARAM_RESPONSE_SLOT_US, 50);
-	zassert_equal(ret, -EINVAL, "Should reject below min");
 }
 
 ZTEST(param_config, test_invalid_param_id)

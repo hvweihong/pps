@@ -35,10 +35,6 @@ LOG_MODULE_REGISTER(bridge_runtime, LOG_LEVEL_INF);
 #define CONFIG_RADIO_BRIDGE_THREAD_STACK_SIZE 4096
 #endif
 
-#ifndef CONFIG_RADIO_BRIDGE_MAX_SLAVES
-#define CONFIG_RADIO_BRIDGE_MAX_SLAVES 3
-#endif
-
 #ifndef CONFIG_RADIO_BRIDGE_UART_RING_SIZE
 #define CONFIG_RADIO_BRIDGE_UART_RING_SIZE 16384
 #endif
@@ -744,10 +740,8 @@ int bridge_runtime_init(void)
 {
 	struct rb_scheduler_config config;
 	struct rb_radio_transport_config radio_config;
-	uint32_t group_id, sync_interval_us, aggregation_timeout_us, time_uart_baud;
+	uint32_t group_id, time_uart_baud;
 	uint32_t uart_baud, radio_delay_us;
-	uint32_t max_idle_poll_us, lease_timeout_us, assignment_window_us;
-	uint32_t response_slot_count, response_slot_us;
 	int ret;
 
 	if (initialized) {
@@ -758,41 +752,6 @@ int bridge_runtime_init(void)
 	ret = rb_param_get_uint32(RB_PARAM_GROUP_ID, &group_id);
 	if (ret != 0) {
 		LOG_ERR("Failed to read group_id: %d", ret);
-		return ret;
-	}
-	ret = rb_param_get_uint32(RB_PARAM_SYNC_INTERVAL_US, &sync_interval_us);
-	if (ret != 0) {
-		LOG_ERR("Failed to read sync_interval_us: %d", ret);
-		return ret;
-	}
-	ret = rb_param_get_uint32(RB_PARAM_AGGREGATION_TIMEOUT_US, &aggregation_timeout_us);
-	if (ret != 0) {
-		LOG_ERR("Failed to read aggregation_timeout_us: %d", ret);
-		return ret;
-	}
-	ret = rb_param_get_uint32(RB_PARAM_IDLE_POLL_MAX_US, &max_idle_poll_us);
-	if (ret != 0) {
-		LOG_ERR("Failed to read max_idle_poll_us: %d", ret);
-		return ret;
-	}
-	ret = rb_param_get_uint32(RB_PARAM_LEASE_TIMEOUT_US, &lease_timeout_us);
-	if (ret != 0) {
-		LOG_ERR("Failed to read lease_timeout_us: %d", ret);
-		return ret;
-	}
-	ret = rb_param_get_uint32(RB_PARAM_ASSIGNMENT_WINDOW_US, &assignment_window_us);
-	if (ret != 0) {
-		LOG_ERR("Failed to read assignment_window_us: %d", ret);
-		return ret;
-	}
-	ret = rb_param_get_uint32(RB_PARAM_RESPONSE_SLOT_COUNT, &response_slot_count);
-	if (ret != 0) {
-		LOG_ERR("Failed to read response_slot_count: %d", ret);
-		return ret;
-	}
-	ret = rb_param_get_uint32(RB_PARAM_RESPONSE_SLOT_US, &response_slot_us);
-	if (ret != 0) {
-		LOG_ERR("Failed to read response_slot_us: %d", ret);
 		return ret;
 	}
 	ret = rb_param_get_uint32(RB_PARAM_UART_BAUDRATE, &uart_baud);
@@ -862,13 +821,13 @@ int bridge_runtime_init(void)
 		.group_id = group_id,
 		.master_session = new_nonzero_session(),
 		.device_id = local_device_id,
-		.sync_interval_us = sync_interval_us,
-		.aggregation_timeout_us = aggregation_timeout_us,
-		.max_idle_poll_us = max_idle_poll_us,
-		.lease_timeout_us = lease_timeout_us,
-		.assignment_window_us = assignment_window_us,
-		.response_slot_count = (uint8_t)response_slot_count,
-		.response_slot_us = (uint16_t)response_slot_us,
+		.sync_interval_us = CONFIG_RADIO_BRIDGE_SYNC_INTERVAL_US,
+		.aggregation_timeout_us = CONFIG_RADIO_BRIDGE_AGGREGATION_TIMEOUT_US,
+		.max_idle_poll_us = CONFIG_RADIO_BRIDGE_IDLE_POLL_MAX_US,
+		.lease_timeout_us = CONFIG_RADIO_BRIDGE_LEASE_TIMEOUT_US,
+		.assignment_window_us = CONFIG_RADIO_BRIDGE_ASSIGNMENT_WINDOW_US,
+		.response_slot_count = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_COUNT,
+		.response_slot_us = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_US,
 	};
 
 	LOG_INF("Bridge runtime: role=%u (%s), device_id=%016llx, group_id=%u",
@@ -886,10 +845,11 @@ int bridge_runtime_init(void)
 	#endif
 	{
 		struct sync_filter_config filter_config = sync_filter_default_config();
-		filter_config.sync_interval_us = sync_interval_us;
+		filter_config.sync_interval_us = CONFIG_RADIO_BRIDGE_SYNC_INTERVAL_US;
 		sync_filter_init(&sync_filter_runtime, &filter_config);
 	}
-	wireless_time_sync_init(&wireless_sync, config.master_session, sync_interval_us,
+	wireless_time_sync_init(&wireless_sync, config.master_session,
+				CONFIG_RADIO_BRIDGE_SYNC_INTERVAL_US,
 				0, radio_delay_us);
 	{
 		struct rb_utc_clock_config utc_config = {

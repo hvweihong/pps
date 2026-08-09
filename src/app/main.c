@@ -122,15 +122,14 @@ static void register_usbd_callbacks(void)
 int main(void)
 {
 	int ret;
-	bool led_heartbeat;
 	bool boot_guard_armed = false;
 	bool retained_diag_valid;
 	int64_t boot_guard_clear_at;
+	const uint32_t status_interval_ms = CONFIG_TIME_SYNC_STATUS_INTERVAL_MS;
 	uint32_t reset_reason = nrf_power_resetreas_get(NRF_POWER);
 	struct radio_boot_guard_load_context boot_guard = {0};
 	struct rb_radio_retained_diag retained_diag = {0};
-	uint32_t role_id, uart_baud, group_id, status_interval_ms;
-	uint32_t pps_width_us, led_period_ms;
+	uint32_t role_id, uart_baud, group_id;
 
 	ret = rb_param_config_init();
 	if (ret != 0) {
@@ -228,30 +227,6 @@ int main(void)
 		return 0;
 	}
 
-	ret = rb_param_get_uint32(RB_PARAM_PPS_WIDTH_US, &pps_width_us);
-	if (ret != 0) {
-		LOG_ERR("failed to read pps_width_us: %d", ret);
-		return 0;
-	}
-
-	ret = rb_param_get_uint32(RB_PARAM_STATUS_INTERVAL_MS, &status_interval_ms);
-	if (ret != 0) {
-		LOG_ERR("failed to read status_interval_ms: %d", ret);
-		return 0;
-	}
-
-	ret = rb_param_get_bool(RB_PARAM_LED_HEARTBEAT, &led_heartbeat);
-	if (ret != 0) {
-		LOG_ERR("failed to read led_heartbeat: %d", ret);
-		return 0;
-	}
-
-	ret = rb_param_get_uint32(RB_PARAM_LED_PERIOD_MS, &led_period_ms);
-	if (ret != 0) {
-		LOG_ERR("failed to read led_period_ms: %d", ret);
-		return 0;
-	}
-
 	LOG_INF("=== XIAO nRF52840 Star Radio UART Bridge ===");
 	LOG_INF("Role: %s (role_id=%u), UART: %u baud",
 		role_id == 0u ? "MASTER" : "SLAVE", role_id, uart_baud);
@@ -267,12 +242,13 @@ int main(void)
 		LOG_ERR("timebase init failed: %d", ret);
 		return 0;
 	}
-	ret = pps_output_init(pps_width_us);
+	ret = pps_output_init(CONFIG_TIME_SYNC_PPS_WIDTH_US);
 	if (ret != 0) {
 		LOG_ERR("pps init failed: %d", ret);
 		return 0;
 	}
-	ret = heartbeat_led_start(led_heartbeat, led_period_ms);
+	ret = heartbeat_led_start(IS_ENABLED(CONFIG_TIME_SYNC_LED_HEARTBEAT),
+				  TIME_SYNC_LED_HEARTBEAT_PERIOD_MS_VALUE);
 	if (ret != 0) {
 		LOG_WRN("heartbeat LED unavailable: %d", ret);
 	}
@@ -311,23 +287,6 @@ int main(void)
 		}
 		if (wdt_dev != NULL) {
 			wdt_feed(wdt_dev, wdt_channel_id);
-		}
-		ret = rb_param_get_uint32(RB_PARAM_STATUS_INTERVAL_MS,
-					  &status_interval_ms);
-		if (ret != 0) {
-			LOG_WRN("failed to refresh status_interval_ms: %d", ret);
-		}
-		ret = rb_param_get_bool(RB_PARAM_LED_HEARTBEAT, &led_heartbeat);
-		if (ret != 0) {
-			LOG_WRN("failed to refresh led_heartbeat: %d", ret);
-		}
-		ret = rb_param_get_uint32(RB_PARAM_LED_PERIOD_MS, &led_period_ms);
-		if (ret != 0) {
-			LOG_WRN("failed to refresh led_period_ms: %d", ret);
-		}
-		ret = heartbeat_led_update(led_heartbeat, led_period_ms);
-		if (ret != 0 && ret != -EAGAIN) {
-			LOG_WRN("heartbeat LED update failed: %d", ret);
 		}
 		k_sleep(K_MSEC(status_interval_ms));
 	}

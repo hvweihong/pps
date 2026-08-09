@@ -53,8 +53,6 @@ static void format_flags(uint32_t flags, char *buf, size_t size)
 {
 	if (flags & RB_PARAM_FLAG_REBOOT_REQUIRED) {
 		snprintf(buf, size, "reboot");
-	} else if (flags & RB_PARAM_FLAG_RUNTIME_UPDATE) {
-		snprintf(buf, size, "runtime");
 	} else {
 		snprintf(buf, size, "none");
 	}
@@ -117,9 +115,6 @@ static int cmd_param_list(const struct shell *sh, size_t argc, char **argv)
 				break;
 			case RB_PARAM_UINT8:
 				default_val = desc->config.u8.default_value;
-				break;
-			case RB_PARAM_BOOL:
-				default_val = desc->config.boolean.default_value ? 1 : 0;
 				break;
 			default:
 				default_val = 0;
@@ -222,15 +217,6 @@ static int cmd_param_set(const struct shell *sh, size_t argc, char **argv)
 			return -EINVAL;
 		}
 		ret = rb_param_set_bytes(id, bytes, sizeof(bytes));
-	} else if (desc->type == RB_PARAM_BOOL) {
-		if (strcmp(argv[2], "true") == 0 || strcmp(argv[2], "1") == 0) {
-			ret = rb_param_set_bool(id, true);
-		} else if (strcmp(argv[2], "false") == 0 || strcmp(argv[2], "0") == 0) {
-			ret = rb_param_set_bool(id, false);
-		} else {
-			shell_error(sh, "Boolean parameter requires true/false or 0/1");
-			return -EINVAL;
-		}
 	} else {
 		errno = 0;
 		value = (uint32_t)strtoul(argv[2], &end, 0);

@@ -1,15 +1,6 @@
 source "Kconfig.zephyr"
 
-config RADIO_BRIDGE_VALIDATION_STAGE
-	int "Incremental board validation stage"
-	default 8
-	range 0 8
-
 menu "Star radio UART bridge"
-
-config RADIO_BRIDGE_NEW_STACK
-	bool "Use star radio UART bridge stack"
-	default y
 
 config RADIO_BRIDGE_GROUP_ID
 	int "Group identifier"
@@ -33,7 +24,7 @@ config TIME_UART_BAUDRATE
 config RADIO_BRIDGE_UART_RING_SIZE
 	int "Bytes in each data UART ring"
 	default 16384
-	range 1024 32768
+	range 16384 32768
 
 config RADIO_BRIDGE_AGGREGATION_TIMEOUT_US
 	int "Partial radio payload aggregation timeout"
@@ -43,11 +34,7 @@ config RADIO_BRIDGE_AGGREGATION_TIMEOUT_US
 config RADIO_BRIDGE_SYNC_INTERVAL_US
 	int "Wireless sync/discovery interval"
 	default 100000
-
-config RADIO_BRIDGE_MAX_SLAVES
-	int "Maximum active slaves"
-	default 3
-	range 3 3
+	range 10000 1000000
 
 config RADIO_BRIDGE_RESPONSE_SLOT_COUNT
 	int "Discovery response slots"
@@ -62,20 +49,17 @@ config RADIO_BRIDGE_RESPONSE_SLOT_US
 config RADIO_BRIDGE_ASSIGNMENT_WINDOW_US
 	int "Assignment receive window"
 	default 6000
+	range 1000 50000
 
 config RADIO_BRIDGE_LEASE_TIMEOUT_US
 	int "Lease timeout without a valid poll"
 	default 100000
+	range 10000 1000000
 
 config RADIO_BRIDGE_IDLE_POLL_MAX_US
 	int "Maximum idle poll interval"
 	default 5000
 	range 1000 5000
-
-config TIME_SYNC_PPS_PERIOD_US
-	int "Fixed PPS period"
-	default 1000000
-	range 1000000 1000000
 
 config TIME_SYNC_PPS_WIDTH_US
 	int "PPS pulse width"
@@ -85,10 +69,12 @@ config TIME_SYNC_PPS_WIDTH_US
 config TIME_SYNC_RADIO_DELAY_US
 	int "Calibrated slave radio delay"
 	default 0
+	range 0 1000
 
 config TIME_SYNC_STATUS_INTERVAL_MS
 	int "Status log interval"
 	default 1000
+	range 100 10000
 
 config TIME_SYNC_LED_HEARTBEAT
 	bool "Blink board LED"
@@ -97,12 +83,12 @@ config TIME_SYNC_LED_HEARTBEAT
 config TIME_SYNC_LED_HEARTBEAT_PERIOD_MS
 	int "LED period"
 	default 1000
+	range 100 10000
 	depends on TIME_SYNC_LED_HEARTBEAT
 
 config RADIO_BRIDGE_TEST_LOSS_INJECTION
 	bool "Enable radio packet loss injection for testing"
 	default n
-	depends on RADIO_BRIDGE_NEW_STACK
 	help
 	  When enabled, selected frame types can be dropped before transmission
 	  or before queueing received frames.  Never enable in production role
@@ -111,7 +97,7 @@ config RADIO_BRIDGE_TEST_LOSS_INJECTION
 config RADIO_BRIDGE_VALIDATION_CDC
 	bool "Enable CDC bridge payload validation commands"
 	default n
-	depends on RADIO_BRIDGE_NEW_STACK && SHELL
+	depends on SHELL
 	help
 	  Adds validation-only pattern injection and verification at the physical
 	  UART/scheduler boundary. Keep disabled in production firmware.
