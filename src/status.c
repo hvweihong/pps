@@ -4,6 +4,8 @@
 
 #include "bridge_runtime.h"
 #include "pps_output.h"
+#include "pps_input.h"
+#include "time_uart.h"
 #include "uart_bridge.h"
 
 LOG_MODULE_REGISTER(star_bridge_status, LOG_LEVEL_INF);
@@ -13,14 +15,29 @@ void status_log_bridge(void)
 	struct rb_bridge_stats bridge;
 	const struct rb_uart_stats *uart = uart_bridge_stats_get();
 	const struct pps_output_stats *pps = pps_output_stats_get();
+	const struct rb_time_uart_stats *time_uart = time_uart_stats_get();
 
 	bridge_runtime_stats_get(&bridge);
 	LOG_INF("bridge_status uart_rx_bytes=%llu uart_tx_bytes=%llu "
-		"uart_rx_drop_bytes=%llu uart_tx_drop_bytes=%llu",
+		"uart_rx_drop_bytes=%llu uart_tx_drop_bytes=%llu "
+		"uart_rx_restart_errors=%u",
 		(unsigned long long)uart->rx_bytes,
 		(unsigned long long)uart->tx_bytes,
 		(unsigned long long)uart->rx_drop_bytes,
-		(unsigned long long)uart->tx_drop_bytes);
+		(unsigned long long)uart->tx_drop_bytes, uart->rx_restart_errors);
+	LOG_INF("time_uart rx_bytes=%llu rx_drop_bytes=%llu lines=%u "
+		"overlong_line_drops=%u output_line_drops=%u "
+		"rx_restart_errors=%u rx_buffer_errors=%u rx_stopped_events=%u "
+		"rx_stop_reason_mask=%u pps_input_count=%llu "
+		"pps_input_drop_count=%llu",
+		(unsigned long long)time_uart->rx_bytes,
+		(unsigned long long)time_uart->rx_drop_bytes,
+		time_uart->lines_received, time_uart->overlong_line_drops,
+		time_uart->output_line_drops, time_uart->rx_restart_errors,
+		time_uart->rx_buffer_errors, time_uart->rx_stopped_events,
+		time_uart->rx_stop_reason_mask,
+		(unsigned long long)pps_input_count(),
+		(unsigned long long)pps_input_drop_count());
 	LOG_INF("bridge_radio radio_tx_packets=%llu radio_rx_packets=%llu "
 		"radio_retry_count=%llu radio_retry_exhausted=%llu "
 		"broadcast_packets=%llu poll_packets=%llu repair_packets=%llu",

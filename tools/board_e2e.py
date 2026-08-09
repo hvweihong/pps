@@ -29,6 +29,9 @@ FLASH_TIMEOUT_S = 20.0
 STATUS_TIMEOUT_S = 30.0
 BRIDGE_TIMEOUT_S = 30.0
 BRIDGE_MAX_LENGTH = 2048
+BOOT_GUARD_CLEAR_MIN_UPTIME_MS = 10000
+BOOT_GUARD_CLEAR_TIMEOUT_S = 30.0
+HISTORY_MAX_BYTES = 256 * 1024
 MASTER_TO_SLAVE_SEED = 49
 SLAVE_TO_MASTER_SEED = 114
 
@@ -227,6 +230,8 @@ class BoardSession:
         self.recovery_count = 0
         self._history: deque[bytes] = deque()
         self._history_size = 0
+        self._history_start = 0
+        self._history_end = 0
 
     def event(self, message: str) -> None:
         print(f"[{self.label}] {message}", flush=True)
@@ -235,18 +240,33 @@ class BoardSession:
     def _remember(self, payload: bytes) -> None:
         self._history.append(payload)
         self._history_size += len(payload)
-        while self._history_size > 256 * 1024 and self._history:
-            self._history_size -= len(self._history.popleft())
+        self._history_end += len(payload)
+        while self._history_size > HISTORY_MAX_BYTES and self._history:
+            discarded = self._history.popleft()
+            self._history_size -= len(discarded)
+            self._history_start += len(discarded)
 
     def clear_history(self) -> None:
         self._history.clear()
         self._history_size = 0
+        self._history_start = self._history_end
 
     def history_text(self) -> str:
         return b"".join(self._history).decode("utf-8", errors="replace")
 
     def history_bytes(self) -> bytes:
         return b"".join(self._history)
+
+    def history_mark(self) -> int:
+        return self._history_end
+
+    def history_since(self, mark: int) -> bytes:
+        if mark >= self._history_end:
+            return b""
+        history = self.history_bytes()
+        if mark <= self._history_start:
+            return history
+        return history[mark - self._history_start:]
 
     def close(self) -> None:
         if self.serial_port is not None:
@@ -466,14 +486,14 @@ def _wait_for_radio_ready(master: BoardSession, slave: BoardSession) -> None:
         STATUS_TIMEOUT_S, master.command_timeout * 3.0, slave.command_timeout * 3.0
     )
     while time.monotonic() < deadline:
-        master_mark = len(master.history_bytes())
-        slave_mark = len(slave.history_bytes())
+        master_mark = master.history_mark()
+        slave_mark = slave.history_mark()
         master.command("kernel uptime")
         slave_output = slave.command("time_sync status")
-        master_fresh = master.history_bytes()[master_mark:].decode(
+        master_fresh = master.history_since(master_mark).decode(
             "utf-8", errors="replace"
         )
-        slave_fresh = slave.history_bytes()[slave_mark:].decode(
+        slave_fresh = slave.history_since(slave_mark).decode(
             "utf-8", errors="replace"
         )
         if _current_pair_ready(master_fresh, slave_output + slave_fresh):
@@ -534,11 +554,11 @@ def _require_runtime_zero_drops(output: str, board: str) -> None:
 
 
 def _wait_for_fresh_runtime_zero_drops(board: BoardSession) -> None:
-    history_mark = len(board.history_bytes())
+    history_mark = board.history_mark()
     deadline = time.monotonic() + max(STATUS_TIMEOUT_S, board.command_timeout * 3.0)
     while time.monotonic() < deadline:
         board.command("kernel uptime")
-        fresh_output = board.history_bytes()[history_mark:].decode(
+        fresh_output = board.history_since(history_mark).decode(
             "utf-8", errors="replace"
         )
         if _runtime_drop_values(fresh_output) is not None:
@@ -547,6 +567,171 @@ def _wait_for_fresh_runtime_zero_drops(board: BoardSession) -> None:
             return
         time.sleep(0.1)
     raise GateError(f"{board.label}: timed out waiting for fresh runtime drop status")
+
+
+def _wait_for_boot_guard_clear(board: BoardSession) -> None:
+    """Do not issue another cold reset while the persisted boot guard is armed."""
+    history_mark = board.history_mark()
+    deadline = time.monotonic() + max(
+        BOOT_GUARD_CLEAR_TIMEOUT_S, board.command_timeout * 3.0
+    )
+    while time.monotonic() < deadline:
+        output = board.command("kernel uptime")
+        match = re.search(r"\bUptime:\s*(\d+)\s*ms\b", output)
+        if match is None:
+            raise GateError(f"{board.label}: kernel uptime was not parseable")
+        uptime_ms = int(match.group(1))
+        fresh_output = board.history_since(history_mark).decode(
+            "utf-8", errors="replace"
+        )
+        marker = "radio boot guard cleared after stable startup"
+        if uptime_ms >= BOOT_GUARD_CLEAR_MIN_UPTIME_MS and marker in fresh_output:
+            board.event(
+                "boot guard clear PASS "
+                f"uptime_ms={uptime_ms} minimum_ms={BOOT_GUARD_CLEAR_MIN_UPTIME_MS}"
+            )
+            return
+        time.sleep(0.1)
+    raise GateError(f"{board.label}: timed out waiting for boot guard clear marker")
+
+
+TIME_UART_ZERO_FIELDS = (
+    "rx_drop_bytes",
+    "overlong_line_drops",
+    "output_line_drops",
+    "rx_restart_errors",
+    "rx_buffer_errors",
+    "rx_stopped_events",
+    "rx_stop_reason_mask",
+    "pps_input_drop_count",
+)
+
+
+def _time_uart_error_values(output: str) -> dict[str, int] | None:
+    status_lines = re.findall(r"\btime_uart\b[^\r\n]*", output)
+    if not status_lines:
+        return None
+    status_line = status_lines[-1]
+    values = {}
+    for field in TIME_UART_ZERO_FIELDS:
+        match = re.search(rf"\b{field}=(\d+)\b", status_line)
+        if match is None:
+            return None
+        values[field] = int(match.group(1))
+    return values
+
+
+def _wait_for_fresh_time_uart_zero_errors(board: BoardSession) -> None:
+    history_mark = board.history_mark()
+    deadline = time.monotonic() + max(STATUS_TIMEOUT_S, board.command_timeout * 3.0)
+    while time.monotonic() < deadline:
+        board.command("kernel uptime")
+        fresh_output = board.history_since(history_mark).decode(
+            "utf-8", errors="replace"
+        )
+        values = _time_uart_error_values(fresh_output)
+        if values is not None:
+            nonzero = {field: value for field, value in values.items() if value != 0}
+            if nonzero:
+                details = " ".join(
+                    f"{field}={value}" for field, value in nonzero.items()
+                )
+                raise GateError(
+                    f"{board.label}: time UART input errors or drops {details}"
+                )
+            board.event("time UART input errors and drops PASS")
+            return
+        time.sleep(0.1)
+    raise GateError(f"{board.label}: timed out waiting for fresh time UART status")
+
+
+def _uptime_ms(board: BoardSession) -> int:
+    output = board.command("kernel uptime")
+    match = re.search(r"\bUptime:\s*(\d+)\s*ms\b", output)
+    if match is None:
+        raise GateError(f"{board.label}: kernel uptime was not parseable")
+    return int(match.group(1))
+
+
+def _run_bidirectional_bridge_gate(
+    master: BoardSession, slave: BoardSession, bridge_length: int, label: str
+) -> None:
+    master.clear_history()
+    slave.clear_history()
+
+    command = f"bridge_test inject {bridge_length} {MASTER_TO_SLAVE_SEED}"
+    output = master.command(command)
+    _expect(
+        output,
+        f"bridge_test inject ok len={bridge_length} seed={MASTER_TO_SLAVE_SEED}",
+        master.label,
+        command,
+    )
+    _wait_for_verify(slave, bridge_length, MASTER_TO_SLAVE_SEED, f"{label}-master-to-slave")
+
+    command = f"bridge_test inject {bridge_length} {SLAVE_TO_MASTER_SEED}"
+    output = slave.command(command)
+    _expect(
+        output,
+        f"bridge_test inject ok len={bridge_length} seed={SLAVE_TO_MASTER_SEED}",
+        slave.label,
+        command,
+    )
+    _wait_for_verify(master, bridge_length, SLAVE_TO_MASTER_SEED, f"{label}-slave-to-master")
+
+    for board in (master, slave):
+        stats = board.command("bridge_test stats")
+        _require_zero_drops(stats, board.label)
+        board.event("bridge_test stats PASS input_drop=0 output_drop=0")
+        _wait_for_fresh_runtime_zero_drops(board)
+        _wait_for_fresh_time_uart_zero_errors(board)
+
+
+def _run_cold_reboot_cycles(
+    master: BoardSession, slave: BoardSession, cycles: int, bridge_length: int
+) -> None:
+    for board, peer in ((master, slave), (slave, master)):
+        for cycle in range(1, cycles + 1):
+            before_uptime = _uptime_ms(board)
+            board.event(
+                f"cold reboot board={board.label} cycle={cycle}/{cycles} "
+                f"pre_uptime_ms={before_uptime}"
+            )
+            board.reboot()
+            # USB CDC can re-enumerate just before its first post-reset read is
+            # reliable.  This bounded settle avoids mistaking that transition
+            # for a firmware command timeout/reflash condition.
+            time.sleep(1.0)
+            after_uptime = _uptime_ms(board)
+            if after_uptime >= before_uptime:
+                raise GateError(
+                    f"{board.label}: cold reboot did not reduce uptime "
+                    f"before={before_uptime} after={after_uptime}"
+                )
+            _wait_for_boot_guard_clear(board)
+            _wait_for_radio_ready(master, slave)
+            for checked_board in (board, peer):
+                _wait_for_fresh_runtime_zero_drops(checked_board)
+                _wait_for_fresh_time_uart_zero_errors(checked_board)
+            board.event(
+                f"cold reboot board={board.label} cycle={cycle}/{cycles} PASS "
+                f"post_uptime_ms={after_uptime} peer_ready=PASS"
+            )
+    _run_bidirectional_bridge_gate(master, slave, bridge_length, "post-cold-reboots")
+
+
+def _run_steady_state_window(
+    master: BoardSession, slave: BoardSession, seconds: float
+) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        _wait_for_radio_ready(master, slave)
+        for board in (master, slave):
+            _wait_for_fresh_runtime_zero_drops(board)
+            _wait_for_fresh_time_uart_zero_errors(board)
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    for board in (master, slave):
+        board.event(f"steady state PASS seconds={seconds:g}")
 
 
 def _run_cycle(
@@ -575,41 +760,8 @@ def _run_cycle(
 
     _wait_for_radio_ready(master, slave)
 
-    command = f"bridge_test inject {bridge_length} {MASTER_TO_SLAVE_SEED}"
-    output = master.command(command)
-    _expect(
-        output,
-        f"bridge_test inject ok len={bridge_length} seed={MASTER_TO_SLAVE_SEED}",
-        master.label,
-        command,
-    )
-    _wait_for_verify(
-        slave,
-        bridge_length,
-        MASTER_TO_SLAVE_SEED,
-        "master-to-slave",
-    )
-
-    command = f"bridge_test inject {bridge_length} {SLAVE_TO_MASTER_SEED}"
-    output = slave.command(command)
-    _expect(
-        output,
-        f"bridge_test inject ok len={bridge_length} seed={SLAVE_TO_MASTER_SEED}",
-        slave.label,
-        command,
-    )
-    _wait_for_verify(
-        master,
-        bridge_length,
-        SLAVE_TO_MASTER_SEED,
-        "slave-to-master",
-    )
-
+    _run_bidirectional_bridge_gate(master, slave, bridge_length, f"cycle-{cycle}")
     for board in (master, slave):
-        stats = board.command("bridge_test stats")
-        _require_zero_drops(stats, board.label)
-        board.event("bridge_test stats PASS input_drop=0 output_drop=0")
-        _wait_for_fresh_runtime_zero_drops(board)
         board.event(f"cycle={cycle}/{cycles} PASS")
 
 
@@ -621,6 +773,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--master-uf2", required=True, type=Path)
     parser.add_argument("--slave-uf2", required=True, type=Path)
     parser.add_argument("--cycles", type=int, default=1)
+    parser.add_argument(
+        "--cold-reboots-per-board", type=int, default=0,
+        help="Sequential cold reboots per board after flashing; waits >=10s guard clear",
+    )
+    parser.add_argument(
+        "--steady-state-seconds", type=float, default=0.0,
+        help="Post-gate radio and UART health observation window",
+    )
     parser.add_argument("--bridge-length", type=int, default=600)
     parser.add_argument("--command-timeout", type=float, default=10.0)
     return parser
@@ -641,6 +801,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             raise GateError("master and slave USB IDs must be distinct")
         if args.cycles < 1:
             raise GateError("--cycles must be >= 1")
+        if args.cold_reboots_per_board < 0:
+            raise GateError("--cold-reboots-per-board must be >= 0")
+        if args.steady_state_seconds < 0:
+            raise GateError("--steady-state-seconds must be >= 0")
         if not 1 <= args.bridge_length <= BRIDGE_MAX_LENGTH:
             raise GateError(
                 f"--bridge-length must be in [1, {BRIDGE_MAX_LENGTH}]"
@@ -670,9 +834,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         try:
             for cycle in range(1, args.cycles + 1):
                 _run_cycle(master, slave, cycle, args.cycles, args.bridge_length)
+            if args.cold_reboots_per_board:
+                _run_cold_reboot_cycles(
+                    master, slave, args.cold_reboots_per_board, args.bridge_length
+                )
+            if args.steady_state_seconds:
+                _run_steady_state_window(
+                    master, slave, args.steady_state_seconds
+                )
             print(
                 "BOARD_E2E PASS "
                 f"stage={args.stage} cycles={args.cycles} length={args.bridge_length} "
+                f"cold_reboots_per_board={args.cold_reboots_per_board} "
                 f"master_flashes={master.flash_count} slave_flashes={slave.flash_count} "
                 f"master_flash_retries={master.flash_retry_count} "
                 f"slave_flash_retries={slave.flash_retry_count} "

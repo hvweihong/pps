@@ -34,6 +34,8 @@ target_sources(app PRIVATE
 	src/time_sync_math.c
 	src/timebase.c
 	src/pps_output.c
+	src/pps_input.c
+	src/time_uart.c
 	src/nmea_parser.c
 	src/utc_clock.c
 	src/param_config.c

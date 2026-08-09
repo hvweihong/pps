@@ -241,12 +241,32 @@ ZTEST(param_config, test_requires_reboot)
 		     "UART baudrate requires reboot");
 	zassert_true(rb_param_requires_reboot(RB_PARAM_UART_RING_SIZE),
 		     "UART ring size requires reboot");
+	zassert_true(rb_param_requires_reboot(RB_PARAM_TIME_UART_BAUDRATE),
+		     "time UART baudrate requires reboot");
 
 	/* Runtime parameters don't */
 	zassert_false(rb_param_requires_reboot(RB_PARAM_AGGREGATION_TIMEOUT_US),
 		      "Aggregation timeout is runtime");
 	zassert_false(rb_param_requires_reboot(RB_PARAM_SYNC_INTERVAL_US),
 		      "Sync interval is runtime");
+}
+
+ZTEST(param_config, test_time_uart_baudrate_range)
+{
+	uint32_t value;
+
+	rb_param_config_init();
+	zassert_equal(rb_param_get_uint32(RB_PARAM_TIME_UART_BAUDRATE, &value), 0,
+		      "get time UART baudrate");
+	zassert_equal(value, 9600, "default time UART baudrate");
+	zassert_equal(rb_param_set_uint32(RB_PARAM_TIME_UART_BAUDRATE, 1200), 0,
+		      "minimum time UART baudrate");
+	zassert_equal(rb_param_set_uint32(RB_PARAM_TIME_UART_BAUDRATE, 115200), 0,
+		      "maximum time UART baudrate");
+	zassert_equal(rb_param_set_uint32(RB_PARAM_TIME_UART_BAUDRATE, 1199), -EINVAL,
+		      "reject below minimum");
+	zassert_equal(rb_param_set_uint32(RB_PARAM_TIME_UART_BAUDRATE, 115201), -EINVAL,
+		      "reject above maximum");
 }
 
 ZTEST(param_config, test_get_descriptor)

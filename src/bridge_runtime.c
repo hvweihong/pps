@@ -18,6 +18,7 @@
 #include "sync_filter.h"
 #include "time_sync_math.h"
 #include "timebase.h"
+#include "time_uart.h"
 #include "uart_bridge.h"
 #include "wireless_time_sync.h"
 
@@ -502,7 +503,7 @@ int bridge_runtime_init(void)
 {
 	struct rb_scheduler_config config;
 	struct rb_radio_transport_config radio_config;
-	uint32_t group_id, sync_interval_us, aggregation_timeout_us;
+	uint32_t group_id, sync_interval_us, aggregation_timeout_us, time_uart_baud;
 	uint32_t max_idle_poll_us, lease_timeout_us, assignment_window_us;
 	uint32_t response_slot_count, response_slot_us;
 	int ret;
@@ -555,6 +556,11 @@ int bridge_runtime_init(void)
 	ret = rb_param_get_uint32(RB_PARAM_PPS_PERIOD_US, &runtime_pps_period_us);
 	if (ret != 0) {
 		LOG_ERR("Failed to read pps_period_us: %d", ret);
+		return ret;
+	}
+	ret = rb_param_get_uint32(RB_PARAM_TIME_UART_BAUDRATE, &time_uart_baud);
+	if (ret != 0) {
+		LOG_ERR("Failed to read time_uart_baudrate: %d", ret);
 		return ret;
 	}
 
@@ -638,6 +644,11 @@ int bridge_runtime_init(void)
 		return ret;
 	}
 	radio_transport_set_wake_callback(bridge_thread_wake);
+	time_uart_set_wake_callback(bridge_thread_wake);
+	ret = time_uart_init(time_uart_baud);
+	if (ret != 0) {
+		return ret;
+	}
 
 	current_profile = config.master ? RB_RADIO_MASTER_PTX :
 		RB_RADIO_SLAVE_GROUP_PRX;

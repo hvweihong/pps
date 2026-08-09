@@ -25,6 +25,11 @@ config RADIO_BRIDGE_UART_BAUDRATE
 	default 115200
 	range 1200 3000000
 
+config TIME_UART_BAUDRATE
+	int "External time UART baud rate"
+	default 9600
+	range 1200 115200
+
 config RADIO_BRIDGE_UART_RING_SIZE
 	int "Bytes in each data UART ring"
 	default 16384

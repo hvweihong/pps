@@ -17,6 +17,7 @@
 #include "link_protocol.h"
 #include "param_config.h"
 #include "pps_output.h"
+#include "pps_input.h"
 #include "radio_transport.h"
 #include "status.h"
 #include "timebase.h"
@@ -219,7 +220,6 @@ int main(void)
 		LOG_ERR("failed to read uart_baudrate: %d", ret);
 		return 0;
 	}
-
 	ret = rb_param_get_uint32(RB_PARAM_GROUP_ID, &group_id);
 	if (ret != 0) {
 		LOG_ERR("failed to read group_id: %d", ret);
@@ -269,6 +269,11 @@ int main(void)
 	ret = timebase_init();
 	if (ret != 0) {
 		LOG_ERR("timebase init failed: %d", ret);
+		return 0;
+	}
+	ret = pps_input_init();
+	if (ret != 0) {
+		LOG_ERR("PPS input init failed: %d", ret);
 		return 0;
 	}
 	ret = pps_output_init((uint16_t)pps_width_us);

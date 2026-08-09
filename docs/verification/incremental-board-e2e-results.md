@@ -388,3 +388,140 @@ native suite 为 **116/116 PASS**（`nmea_parser` 8/8，`utc_clock` 15/15）。
   `build/board-e2e/20260809T054517.485999Z-nmea-utc-pure-review/slave.raw.log`、
   `build/board-e2e/20260809T054517.485999Z-nmea-utc-pure-review/master.steady-30s.raw.log`、
   `build/board-e2e/20260809T054517.485999Z-nmea-utc-pure-review/slave.steady-30s.raw.log`。
+
+## Stage 3 — external PPS capture and NMEA UART input
+
+执行日期：2026-08-09。基线为 `85d2a23f5c5a68e8cb4b1a8d9e7dffc322e48a2f`；所有下列
+firmware artifacts 都在该基线上带 Stage 3 未提交改动（dirty）构建。
+
+### Host verification
+
+- bridge native suite：**117/117 PASS**；sync native suite：**15/15 PASS**。
+- Python board-gate/UF2 suite：**43/43 PASS**。
+- `for script in tests/*_static_check.sh; do bash "$script"; done`：10 个 active checks
+  PASS，15 个 retired BLE/MPSL checks 按配置 SKIP，0 FAIL。
+- `/home/hv/ncs/.venv/bin/python -m ruff check tests tools` 与 `git diff --check`：PASS。
+- `tests/test_board_e2e.py` 将 CDC rolling history 改为 absolute cursor；回归测试覆盖
+  boot-guard marker、radio readiness、runtime drops 与 time-UART errors 在历史头部淘汰后仍只
+  读取新样本的情况。
+
+执行命令：
+
+```sh
+ZEPHYR_BASE=/home/hv/ncs/zephyr /home/hv/ncs/.venv/bin/west build -p always \
+  -b native_sim/native tests/bridge_logic -d build/tests/bridge_logic
+./build/tests/bridge_logic/bridge_logic/zephyr/zephyr.exe
+ZEPHYR_BASE=/home/hv/ncs/zephyr /home/hv/ncs/.venv/bin/west build -p always \
+  -b native_sim/native tests/sync_logic -d build/tests/sync_logic
+./build/tests/sync_logic/sync_logic/zephyr/zephyr.exe
+/home/hv/ncs/.venv/bin/python -m unittest -v tests/test_board_e2e.py tests/test_flash_uf2.py
+for script in tests/*_static_check.sh; do bash "$script"; done
+/home/hv/ncs/.venv/bin/python -m ruff check tests tools
+git diff --check
+```
+
+### Fresh firmware builds and DTS evidence
+
+| build | command | FLASH | RAM | UF2 |
+| --- | --- | ---: | ---: | --- |
+| production master | `./build.sh master -d build/stage3-master` | 168704 B | 186228 B | 337408 B, `61673ce7cce211650d512f77ceb99852379523cddfcd29cd5b830e8efe67ea09` |
+| production slave | `./build.sh slave -d build/stage3-slave` | 168704 B | 186228 B | 337408 B, `61673ce7cce211650d512f77ceb99852379523cddfcd29cd5b830e8efe67ea09` |
+| validation (runtime-wake) | `./build.sh master -d build/stage3-validation -- -DOVERLAY_CONFIG=validation.conf` | 171432 B | 190388 B | 343040 B, `8a24e34f10b907233dcfe76d664318911aa53c6377b7b8e8a3fb527f9e965abc` |
+| validation (stopped-event fix) | `./build.sh master -d build/stage3-validation -- -DOVERLAY_CONFIG=validation.conf` | 171588 B | 190388 B | 343552 B, `76fc9802d753e0e35ddfe2569535016db57d84e15290b2b9bd1ad5f6a258e3f9` |
+
+Production master/slave images were not rebuilt for the stopped-event correction; their rows
+remain the earlier runtime-wake artifacts. The fixed validation UF2 is the artifact used below.
+
+`build/stage3-master/zephyr/zephyr.dts` confirms `time-uart = &uart1` and `pps-in =
+&pps_in` (lines 35 and 38), UART1 at 9600 baud with default/sleep pinctrl (lines 625–637),
+P0.04 TX / P0.05 pull-up RX encoded in `uart1_default` (lines 934–960), and PPS input GPIO0
+P0.02 (lines 1080–1084).
+
+### Reboot-gate investigation and final hardware result
+
+Earlier failed evidence is intentionally retained:
+
+- `build/board-e2e/20260809T062226.103068Z-stage3-reboots-authoritative/` proved that a
+  second reboot before the 10 s persisted radio boot-guard clear interval enters the
+  guard-recovery safety loop.
+- `build/board-e2e/20260809T063038.274182Z-stage3-authoritative/` was externally interrupted
+  during slave reboot 1/5; it has no `BOARD_E2E FAIL` record and does not constitute a pass.
+- `build/board-e2e/20260809T064513.579709Z-stage3-authoritative-final/` reached slave reboot
+  5/5 and physically logged the clear marker, but the old length-based fresh-history slice missed
+  it after the 256 KiB rolling history evicted its head. This run is a failure, not combined with
+  any partial result.
+
+The earlier cursor run
+`build/board-e2e/20260809T065445.948488Z-stage3-authoritative-final-cursor/` remains
+preserved but is superseded after the Important wake-registration correction connected the
+time-UART ring ingestion to the bridge worker wake callback. The corrected integration was
+verified by one new complete command, with a 600 s outer timeout:
+
+```sh
+/usr/bin/timeout 600s /home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage3-authoritative-final-runtime-wake \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage3-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage3-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --cold-reboots-per-board 5 --steady-state-seconds 30 \
+  --bridge-length 600 --command-timeout 10
+```
+
+- Result: **`BOARD_E2E PASS`** after 242.8 s; exact-ID flashes master/slave 1/1, no flash retry,
+  no command recovery.
+- Master 5/5 then slave 5/5 each recorded CDC re-enumeration, reduced post-reset uptime,
+  `radio boot guard cleared after stable startup` after at least 10 s, peer readiness
+  (`active_count=1` / `LOCKED`), zero bridge queue drops, and
+  `time_uart rx_restart_errors=0 rx_buffer_errors=0`.
+- Post-reboot exact 600-byte traffic passed in both directions; `--steady-state-seconds 30`
+  repeatedly rechecked radio readiness, runtime drops and time-UART errors, then recorded PASS on
+  both boards.
+- Final raw evidence:
+  `build/board-e2e/20260809T071042.917744Z-stage3-authoritative-final-runtime-wake/master.raw.log`
+  and
+  `build/board-e2e/20260809T071042.917744Z-stage3-authoritative-final-runtime-wake/slave.raw.log`。
+
+The above 5+5 cold-reboot and 30 s steady-state result belongs to the runtime-wake firmware. It is
+preserved as historical robustness evidence, but is superseded as the authoritative Stage 3
+firmware result by the stopped-event correction below.
+
+### Stopped-event correction hardware result
+
+`UART_RX_STOPPED` now records an atomic-safe event count and reason mask before it conditionally
+copies only non-NULL, non-empty RX data. The board gate requires zero for every reported input
+drop/error field: `rx_drop_bytes`, `overlong_line_drops`, `output_line_drops`,
+`rx_restart_errors`, `rx_buffer_errors`, `rx_stopped_events`, `rx_stop_reason_mask`, and
+`pps_input_drop_count`.
+
+The corrected validation UF2 was verified with this standalone command:
+
+```sh
+/usr/bin/timeout 600s /home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage3-time-uart-stopped-fix-short-gate \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage3-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage3-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --cold-reboots-per-board 1 --steady-state-seconds 15 \
+  --bridge-length 600 --command-timeout 10
+```
+
+- Result: **`BOARD_E2E PASS`** after 89 s; exact-ID flash master/slave 1/1, zero flash retries,
+  and zero automatic command recoveries.
+- This corrected-firmware run completed one cold reboot of each board, exact 600-byte traffic in
+  both directions before and after reboot, and a 15 s steady-state window. It is intentionally not
+  presented as a replacement 5+5/30 s endurance result.
+- Authoritative raw evidence:
+  `build/board-e2e/20260809T073739.138526Z-stage3-time-uart-stopped-fix-short-gate/master.raw.log`
+  and
+  `build/board-e2e/20260809T073739.138526Z-stage3-time-uart-stopped-fix-short-gate/slave.raw.log`。
+
+The ISR ring ingestion and bridge worker wake are connected, but this stage does not yet wire
+NMEA parsing or any `time_uart_read_line()` consumer. That work is intentionally deferred to
+Task 4.
+
+### Verification boundary
+
+No external PPS source, GNSS NMEA source, oscilloscope, or logic analyzer was wired for this
+stage. The result validates firmware integration, CDC transport, reboot safety, and the enumerated
+software input drop/error counters; it makes no claim that physical PPS capture, NMEA
+reception/association, or electrical timing accuracy has been measured.

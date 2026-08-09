@@ -92,6 +92,7 @@ enum rb_param_id {
 	RB_PARAM_STATUS_INTERVAL_MS,
 	RB_PARAM_LED_HEARTBEAT,
 	RB_PARAM_LED_PERIOD_MS,
+	RB_PARAM_TIME_UART_BAUDRATE,
 	RB_PARAM_COUNT  /**< Total parameter count */
 };
 

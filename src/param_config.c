@@ -256,6 +256,18 @@ const struct rb_param_descriptor rb_param_table[RB_PARAM_COUNT] = {
 		},
 		.nvs_id = 0x1010,
 	},
+	[RB_PARAM_TIME_UART_BAUDRATE] = {
+		.name = "time_uart_baudrate",
+		.description = "External time UART baud rate",
+		.type = RB_PARAM_UINT32,
+		.flags = RB_PARAM_FLAG_REBOOT_REQUIRED,
+		.config.u32 = {
+			.min = 1200,
+			.max = 115200,
+			.default_value = CONFIG_TIME_UART_BAUDRATE,
+		},
+		.nvs_id = 0x1011,
+	},
 };
 
 /* Get default value for a parameter */

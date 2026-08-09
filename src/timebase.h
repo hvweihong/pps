@@ -5,6 +5,7 @@
 
 #define TIMEBASE_TICKS_PER_SEC 1000000u
 #define TIMEBASE_RADIO_CAPTURE_CHANNEL 3u
+#define TIMEBASE_PPS_INPUT_CAPTURE_CHANNEL 4u
 
 int timebase_init(void);
 uint64_t timebase_now_us(void);

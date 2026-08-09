@@ -20,7 +20,7 @@
 #define TIMEBASE_COMPARE_FIRST_CHANNEL 1u
 #define TIMEBASE_COMPARE_LAST_CHANNEL 2u
 #define TIMEBASE_PPI_CHANNEL 3u
-#define TIMEBASE_CHANNEL_COUNT 4u
+#define TIMEBASE_CHANNEL_COUNT 6u
 #define TIMEBASE_COMPARE_MASK(ch) nrf_timer_compare_int_get(ch)
 
 static volatile uint32_t high_word;

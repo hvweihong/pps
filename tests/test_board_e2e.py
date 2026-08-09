@@ -119,6 +119,27 @@ class CommandRecoveryTests(unittest.TestCase):
         self.assertIn("still waiting", messages[-1])
 
 
+class HistoryCursorTests(unittest.TestCase):
+    def test_history_since_keeps_fresh_marker_after_rollover(self):
+        board_e2e = load_board_e2e()
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             mock.patch.object(board_e2e, "HISTORY_MAX_BYTES", 24):
+            raw_log = board_e2e.TimestampedRawLog(Path(temp_dir) / "board.raw.log")
+            self.addCleanup(raw_log.close)
+            board = board_e2e.BoardSession(
+                "master", "DBE5C3D84EA2EC6F", Path("firmware.uf2"), 1.0, raw_log
+            )
+            board._remember(b"s" * 16)
+            fresh_mark = board.history_mark()
+            board._remember(b"guard-marker")
+            board._remember(b"post")
+
+            fresh = board.history_since(fresh_mark)
+
+        self.assertIn(b"guard-marker", fresh)
+        self.assertIn(b"post", fresh)
+
+
 class ShellOutputTests(unittest.TestCase):
     def test_role_parser_accepts_current_param_output(self):
         board_e2e = load_board_e2e()
@@ -359,6 +380,12 @@ class RuntimeFreshnessTests(unittest.TestCase):
             def history_bytes(self):
                 return bytes(self.history)
 
+            def history_mark(self):
+                return len(self.history)
+
+            def history_since(self, mark):
+                return bytes(self.history[mark:])
+
             def command(self, command):
                 self.history.extend(
                     b" uart_rx_drop_bytes=0 uart_tx_drop_bytes=0 "
@@ -395,6 +422,12 @@ class RuntimeFreshnessTests(unittest.TestCase):
             def history_bytes(self):
                 return bytes(self.history)
 
+            def history_mark(self):
+                return len(self.history)
+
+            def history_since(self, mark):
+                return bytes(self.history[mark:])
+
             def command(self, command):
                 self.history.extend(
                     b" uart_rx_drop_bytes=0 uart_tx_drop_bytes=1 "
@@ -407,6 +440,221 @@ class RuntimeFreshnessTests(unittest.TestCase):
 
         with self.assertRaises(board_e2e.GateError):
             wait_for_fresh(FakeBoard())
+
+
+class BootGuardClearTests(unittest.TestCase):
+    def test_guard_clear_waits_until_minimum_uptime(self):
+        board_e2e = load_board_e2e()
+        wait_for_guard_clear = require_symbol(
+            board_e2e, "_wait_for_boot_guard_clear"
+        )
+
+        class FakeBoard:
+            label = "master"
+            command_timeout = 0.01
+
+            def __init__(self):
+                self.outputs = iter(
+                    [
+                        "Uptime: 9999 ms",
+                        "Uptime: 10000 ms\nradio boot guard cleared after stable startup",
+                    ]
+                )
+                self.commands = []
+                self.events = []
+                self.history = bytearray()
+
+            def command(self, command):
+                self.commands.append(command)
+                output = next(self.outputs)
+                self.history.extend(output.encode())
+                return output
+
+            def history_bytes(self):
+                return bytes(self.history)
+
+            def history_mark(self):
+                return len(self.history)
+
+            def history_since(self, mark):
+                return bytes(self.history[mark:])
+
+            def event(self, message):
+                self.events.append(message)
+
+        board = FakeBoard()
+        with mock.patch.object(board_e2e.time, "sleep") as sleep:
+            wait_for_guard_clear(board)
+
+        self.assertEqual(board.commands, ["kernel uptime", "kernel uptime"])
+        sleep.assert_called_once()
+        self.assertEqual(
+            board.events,
+            ["boot guard clear PASS uptime_ms=10000 minimum_ms=10000"],
+        )
+
+
+class TimeUartFreshnessTests(unittest.TestCase):
+    def test_fresh_time_uart_check_ignores_stale_error_counters(self):
+        board_e2e = load_board_e2e()
+        wait_for_fresh = require_symbol(
+            board_e2e, "_wait_for_fresh_time_uart_zero_errors"
+        )
+
+        class FakeBoard:
+            label = "slave"
+            command_timeout = 0.01
+
+            def __init__(self):
+                self.history = bytearray(
+                    b"time_uart rx_restart_errors=1 rx_buffer_errors=2"
+                )
+                self.events = []
+
+            def history_mark(self):
+                return len(self.history)
+
+            def history_since(self, mark):
+                return bytes(self.history[mark:])
+
+            def command(self, command):
+                self.history.extend(
+                    b" time_uart rx_drop_bytes=0 overlong_line_drops=0 "
+                    b"output_line_drops=0 rx_restart_errors=0 rx_buffer_errors=0 "
+                    b"rx_stopped_events=0 rx_stop_reason_mask=0 "
+                    b"pps_input_drop_count=0"
+                )
+                return "Uptime: 10 ms"
+
+            def event(self, message):
+                self.events.append(message)
+
+        board = FakeBoard()
+        wait_for_fresh(board)
+
+        self.assertEqual(
+            board.events,
+            ["time UART input errors and drops PASS"],
+        )
+
+    def test_time_uart_check_rejects_missing_reported_fields(self):
+        board_e2e = load_board_e2e()
+        wait_for_fresh = require_symbol(
+            board_e2e, "_wait_for_fresh_time_uart_zero_errors"
+        )
+
+        class FakeBoard:
+            label = "slave"
+            command_timeout = 0.0
+
+            def history_mark(self):
+                return 0
+
+            def history_since(self, mark):
+                return b"time_uart rx_restart_errors=0 rx_buffer_errors=0"
+
+            def command(self, command):
+                return "Uptime: 10 ms"
+
+            def event(self, message):
+                pass
+
+        with mock.patch.object(board_e2e, "STATUS_TIMEOUT_S", 1.0), mock.patch.object(
+            board_e2e.time, "monotonic", side_effect=[0.0, 0.0, 2.0]
+        ), mock.patch.object(board_e2e.time, "sleep"):
+            with self.assertRaises(board_e2e.GateError):
+                wait_for_fresh(FakeBoard())
+
+    def test_time_uart_check_rejects_each_nonzero_input_error_or_drop(self):
+        board_e2e = load_board_e2e()
+        wait_for_fresh = require_symbol(
+            board_e2e, "_wait_for_fresh_time_uart_zero_errors"
+        )
+        fields = (
+            "rx_drop_bytes",
+            "overlong_line_drops",
+            "output_line_drops",
+            "rx_restart_errors",
+            "rx_buffer_errors",
+            "rx_stopped_events",
+	    "rx_stop_reason_mask",
+            "pps_input_drop_count",
+        )
+
+        for failing_field in fields:
+            with self.subTest(field=failing_field):
+                values = {
+                    "rx_drop_bytes": 0,
+                    "overlong_line_drops": 0,
+                    "output_line_drops": 0,
+                    "rx_restart_errors": 0,
+                    "rx_buffer_errors": 0,
+                    "rx_stopped_events": 0,
+	                "rx_stop_reason_mask": 0,
+                    "pps_input_drop_count": 0,
+                }
+                values[failing_field] = 1
+                status = (
+                    "time_uart rx_drop_bytes={rx_drop_bytes} "
+                    "overlong_line_drops={overlong_line_drops} "
+                    "output_line_drops={output_line_drops} "
+                    "rx_restart_errors={rx_restart_errors} "
+                    "rx_buffer_errors={rx_buffer_errors} "
+                    "rx_stopped_events={rx_stopped_events} "
+	                "rx_stop_reason_mask={rx_stop_reason_mask} "
+                    "pps_input_drop_count={pps_input_drop_count}"
+                ).format(**values)
+
+                class FakeBoard:
+                    label = "master"
+                    command_timeout = 0.0
+
+                    def history_mark(self):
+                        return 0
+
+                    def history_since(self, mark):
+                        return status.encode()
+
+                    def command(self, command):
+                        return "Uptime: 10 ms"
+
+                    def event(self, message):
+                        pass
+
+                with self.assertRaises(board_e2e.GateError):
+                    wait_for_fresh(FakeBoard())
+
+
+class SteadyStateTests(unittest.TestCase):
+    def test_steady_window_checks_both_boards_until_deadline(self):
+        board_e2e = load_board_e2e()
+        wait_for_steady = require_symbol(board_e2e, "_run_steady_state_window")
+
+        class FakeBoard:
+            def __init__(self, label):
+                self.label = label
+                self.events = []
+
+            def event(self, message):
+                self.events.append(message)
+
+        master = FakeBoard("master")
+        slave = FakeBoard("slave")
+        with mock.patch.object(board_e2e, "_wait_for_radio_ready") as ready, \
+             mock.patch.object(board_e2e, "_wait_for_fresh_runtime_zero_drops") as drops, \
+             mock.patch.object(board_e2e, "_wait_for_fresh_time_uart_zero_errors") as uart, \
+             mock.patch.object(
+                 board_e2e.time, "monotonic", side_effect=[0.0, 0.0, 0.0, 30.0]
+             ), \
+             mock.patch.object(board_e2e.time, "sleep") as sleep:
+            wait_for_steady(master, slave, 30.0)
+
+        ready.assert_called_once_with(master, slave)
+        self.assertEqual(drops.call_count, 2)
+        self.assertEqual(uart.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+        self.assertEqual(master.events, ["steady state PASS seconds=30"])
+        self.assertEqual(slave.events, ["steady state PASS seconds=30"])
 
 
 class ReadinessFreshnessTests(unittest.TestCase):
@@ -425,6 +673,12 @@ class ReadinessFreshnessTests(unittest.TestCase):
 
             def history_bytes(self):
                 return bytes(self.history)
+
+            def history_mark(self):
+                return len(self.history)
+
+            def history_since(self, mark):
+                return bytes(self.history[mark:])
 
             def command(self, command):
                 self.history.extend(self.fresh)
@@ -555,6 +809,26 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("--bridge-length must be in [1, 2048]", stderr.getvalue())
+
+    def test_negative_steady_state_seconds_fails(self):
+        board_e2e = load_board_e2e()
+        stderr = io.StringIO()
+        with mock.patch.object(sys, "stderr", stderr):
+            result = board_e2e.main(
+                [
+                    "--stage",
+                    "stage3",
+                    "--master-uf2",
+                    "missing-master.uf2",
+                    "--slave-uf2",
+                    "missing-slave.uf2",
+                    "--steady-state-seconds",
+                    "-1",
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("--steady-state-seconds must be >= 0", stderr.getvalue())
 
     def test_direct_script_execution_loads_tools_package(self):
         root = Path(__file__).resolve().parents[1]
