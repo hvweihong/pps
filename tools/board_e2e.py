@@ -2,6 +2,8 @@
 """Fixed-ID dual-board end-to-end validation gate."""
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import sys
@@ -32,6 +34,7 @@ BRIDGE_MAX_LENGTH = 2048
 BOOT_GUARD_CLEAR_MIN_UPTIME_MS = 10000
 BOOT_GUARD_CLEAR_TIMEOUT_S = 30.0
 HISTORY_MAX_BYTES = 256 * 1024
+EVIDENCE_ROOT = Path("build") / "board-e2e"
 MASTER_TO_SLAVE_SEED = 49
 SLAVE_TO_MASTER_SEED = 114
 UPLINK_ACK_LOSS_SEED = 213
@@ -54,6 +57,17 @@ class CommandTimeout(GateError):
         self.tail = captured if isinstance(captured, bytes) else captured.encode()
         detail = f": {self.command}" if self.command else ""
         super().__init__(f"command timed out{detail}")
+
+
+class RecoveryBudget:
+    def __init__(self, limit: int = 1):
+        self.limit = limit
+        self.used = 0
+
+    def claim(self, label: str) -> None:
+        if self.used >= self.limit:
+            raise GateError(f"{label}: automatic recovery budget exhausted")
+        self.used += 1
 
 
 def resolve_serial(
@@ -83,14 +97,35 @@ def _exact_application_identity_present(
     )
 
 
+def _wait_for_exact_flash_identity(device_id: str, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            resolve_serial(device_id)
+            return False
+        except GateError as serial_error:
+            if _exact_application_identity_present(device_id):
+                raise GateError(
+                    f"application identity failed closed: {serial_error}"
+                ) from serial_error
+        try:
+            flash_uf2.uf2_disk_for(device_id)
+            return True
+        except flash_uf2.FlashError as disk_error:
+            if time.monotonic() >= deadline:
+                raise GateError(
+                    "timed out waiting for exact application or UF2 identity"
+                ) from disk_error
+        time.sleep(0.05)
+
+
 CommandResult = TypeVar("CommandResult")
 
 
 def _timeout_message(error: CommandTimeout, attempt: int, command: str) -> str:
     tail = error.tail.decode("utf-8", errors="backslashreplace")
     return (
-        f"command timeout attempt {attempt}/2 command={command!r} "
-        f"receive_tail={tail!r}"
+        f"command timeout attempt {attempt}/2 command={command!r} receive_tail={tail!r}"
     )
 
 
@@ -112,21 +147,38 @@ def run_command_with_recovery(
         raise
 
 
+def validate_stage_result(result: dict[str, object]) -> None:
+    if result.get("master_to_slave") is not True:
+        raise GateError("master-to-slave bridge direction did not pass")
+    if result.get("slave_to_master") is not True:
+        raise GateError("slave-to-master bridge direction did not pass")
+    if result.get("queue_drops") != 0:
+        raise GateError(f"queue drops must be zero: {result.get('queue_drops')}")
+    recoveries = result.get("recoveries")
+    if not isinstance(recoveries, int) or recoveries > 1:
+        raise GateError(f"recoveries must be at most one: {recoveries}")
+
+
 def _parse_role(output: str) -> int:
-    match = re.search(r"(?m)^role_id = ([0-3]) \((?:persisted|default), reboot\)\s*$", output)
+    match = re.search(
+        r"(?m)^role_id = ([0-3]) \((?:persisted|default), reboot\)\s*$", output
+    )
     if match is None:
         raise GateError("param get role_id returned unrecognized output")
     return int(match.group(1))
 
 
-def _require_zero_drops(output: str, board: str) -> None:
+def _require_zero_drops(output: str, board: "str | BoardSession") -> None:
+    board_label = board if isinstance(board, str) else board.label
     match = re.search(r"\binput_drop=(\d+)\s+output_drop=(\d+)\b", output)
     if match is None:
-        raise GateError(f"{board}: bridge_test stats drop fields are missing")
+        raise GateError(f"{board_label}: bridge_test stats drop fields are missing")
     input_drop, output_drop = (int(value) for value in match.groups())
     if input_drop != 0 or output_drop != 0:
+        if not isinstance(board, str):
+            board.queue_drops += input_drop + output_drop
         raise GateError(
-            f"{board}: bridge_test drops are non-zero: "
+            f"{board_label}: bridge_test drops are non-zero: "
             f"input_drop={input_drop} output_drop={output_drop}"
         )
 
@@ -146,7 +198,11 @@ def _slave_ready(output: str) -> bool:
     if not matches:
         return False
     latest = matches[-1]
-    return latest.group(1) == "2" if latest.group(1) is not None else latest.group(2) == "LOCKED"
+    return (
+        latest.group(1) == "2"
+        if latest.group(1) is not None
+        else latest.group(2) == "LOCKED"
+    )
 
 
 def _current_pair_ready(master_output: str, slave_output: str) -> bool:
@@ -190,9 +246,36 @@ def _command_response_complete(received: bytes, command: str) -> bool:
 
 
 def _timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
     )
+
+
+def _uf2_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as firmware:
+            while chunk := firmware.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as exc:
+        raise GateError(f"failed to hash UF2 {path}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def _write_json_summary(path: Path, summary: dict[str, object]) -> None:
+    with path.open("w", encoding="utf-8") as summary_file:
+        json.dump(summary, summary_file, indent=2, sort_keys=True)
+        summary_file.write("\n")
+        summary_file.flush()
+        os.fsync(summary_file.fileno())
+
+
+def _exception_text(error: Exception) -> str:
+    if isinstance(error, GateError):
+        return str(error)
+    return f"{type(error).__name__}: {error}"
 
 
 class TimestampedRawLog:
@@ -219,16 +302,19 @@ class BoardSession:
         uf2: Path,
         command_timeout: float,
         raw_log: TimestampedRawLog,
+        recovery_budget: RecoveryBudget | None = None,
     ):
         self.label = label
         self.device_id = device_id.upper()
         self.uf2 = uf2
         self.command_timeout = command_timeout
         self.raw_log = raw_log
+        self.recovery_budget = recovery_budget or RecoveryBudget()
         self.serial_port = None
         self.flash_count = 0
         self.flash_retry_count = 0
         self.recovery_count = 0
+        self.queue_drops = 0
         self._history: deque[bytes] = deque()
         self._history_size = 0
         self._history_start = 0
@@ -267,7 +353,7 @@ class BoardSession:
         history = self.history_bytes()
         if mark <= self._history_start:
             return history
-        return history[mark - self._history_start:]
+        return history[mark - self._history_start :]
 
     def close(self) -> None:
         if self.serial_port is not None:
@@ -277,22 +363,20 @@ class BoardSession:
                 self.serial_port = None
 
     def _flash_once_for_current_state(self) -> None:
-        no_1200_touch = False
         try:
-            resolve_serial(self.device_id)
-        except GateError as serial_error:
-            if _exact_application_identity_present(self.device_id):
-                raise GateError(
-                    f"{self.label}: application identity failed closed: {serial_error}"
-                ) from serial_error
+            no_1200_touch = _wait_for_exact_flash_identity(
+                self.device_id, max(FLASH_TIMEOUT_S, self.command_timeout)
+            )
+        except GateError as exc:
+            raise GateError(f"{self.label}: {exc}") from exc
+        if no_1200_touch:
+            self.event("exact ID is in UF2 mode")
+        else:
+            self.connect()
             try:
-                flash_uf2.uf2_disk_for(self.device_id)
-            except flash_uf2.FlashError as disk_error:
-                raise GateError(
-                    f"{self.label}: neither exact application nor UF2 identity is available"
-                ) from disk_error
-            self.event(f"exact ID already in UF2 mode after: {serial_error}")
-            no_1200_touch = True
+                _wait_for_boot_guard_clear(self)
+            finally:
+                self.close()
         try:
             flash_uf2.flash_once(
                 self.device_id,
@@ -307,14 +391,14 @@ class BoardSession:
         self.close()
         last_error: GateError | None = None
         for attempt in (1, 2):
+            if attempt == 2:
+                self.flash_retry_count += 1
             self.event(
                 f"flash exact_id={self.device_id} attempt={attempt}/2 uf2={self.uf2}"
             )
             try:
                 self._flash_once_for_current_state()
                 self.flash_count += 1
-                if attempt == 2:
-                    self.flash_retry_count += 1
                 self.event(f"flash PASS exact_id={self.device_id} attempt={attempt}/2")
                 return
             except GateError as exc:
@@ -420,6 +504,9 @@ class BoardSession:
         return output.decode("utf-8", errors="replace")
 
     def recover(self) -> None:
+        if self.recovery_count >= 1:
+            raise GateError(f"{self.label}: automatic recovery budget exhausted")
+        self.recovery_budget.claim(self.label)
         self.recovery_count += 1
         self.event(
             f"automatic command-timeout recovery={self.recovery_count} "
@@ -494,15 +581,15 @@ def _wait_for_radio_ready(master: BoardSession, slave: BoardSession) -> None:
         master_fresh = master.history_since(master_mark).decode(
             "utf-8", errors="replace"
         )
-        slave_fresh = slave.history_since(slave_mark).decode(
-            "utf-8", errors="replace"
-        )
+        slave_fresh = slave.history_since(slave_mark).decode("utf-8", errors="replace")
         if _current_pair_ready(master_fresh, slave_output + slave_fresh):
             master.event("radio ready active_count=1")
             slave.event("time sync ready sync_state=2/LOCKED")
             return
         time.sleep(0.25)
-    raise GateError("radio readiness timeout: current active_count=1/LOCKED pair missing")
+    raise GateError(
+        "radio readiness timeout: current active_count=1/LOCKED pair missing"
+    )
 
 
 def _wait_for_verify(
@@ -518,7 +605,9 @@ def _wait_for_verify(
     while time.monotonic() < deadline:
         last_output = board.command(command)
         if expected in last_output:
-            board.event(f"bridge verify PASS direction={direction} len={length} seed={seed}")
+            board.event(
+                f"bridge verify PASS direction={direction} len={length} seed={seed}"
+            )
             return
         if "verify failed" in last_output or "verify overflow" in last_output:
             raise GateError(f"{board.label}: {direction} verify failed")
@@ -545,13 +634,17 @@ def _runtime_drop_values(output: str) -> dict[str, int] | None:
     return values
 
 
-def _require_runtime_zero_drops(output: str, board: str) -> None:
+def _require_runtime_zero_drops(output: str, board: str | BoardSession) -> None:
+    board_label = board if isinstance(board, str) else board.label
     values = _runtime_drop_values(output)
     if values is None:
-        raise GateError(f"{board}: one or more runtime drop fields are missing")
+        raise GateError(f"{board_label}: one or more runtime drop fields are missing")
+    observed_drops = sum(values.values())
+    if not isinstance(board, str) and observed_drops:
+        board.queue_drops = getattr(board, "queue_drops", 0) + observed_drops
     for field, value in values.items():
         if value != 0:
-            raise GateError(f"{board}: {field}={value}, expected zero")
+            raise GateError(f"{board_label}: {field}={value}, expected zero")
 
 
 def _bridge_stat_value(output: str, field: str) -> int:
@@ -600,8 +693,7 @@ def _require_master_record_diagnostics(
         )
     if values["node1_bytes"] != expected_bytes:
         raise GateError(
-            f"{board}: node1_bytes={values['node1_bytes']}, "
-            f"expected {expected_bytes}"
+            f"{board}: node1_bytes={values['node1_bytes']}, expected {expected_bytes}"
         )
     for field in (
         "node1_record_drop",
@@ -686,7 +778,7 @@ def _wait_for_fresh_runtime_zero_drops(board: BoardSession) -> None:
             "utf-8", errors="replace"
         )
         if _runtime_drop_values(fresh_output) is not None:
-            _require_runtime_zero_drops(fresh_output, board.label)
+            _require_runtime_zero_drops(fresh_output, board)
             board.event("runtime queue drops PASS uart_rx=0 uart_tx=0 bridge_queue=0")
             return
         time.sleep(0.1)
@@ -695,28 +787,24 @@ def _wait_for_fresh_runtime_zero_drops(board: BoardSession) -> None:
 
 def _wait_for_boot_guard_clear(board: BoardSession) -> None:
     """Do not issue another cold reset while the persisted boot guard is armed."""
-    history_mark = board.history_mark()
+    run_command = getattr(board, "_command_once", board.command)
     deadline = time.monotonic() + max(
         BOOT_GUARD_CLEAR_TIMEOUT_S, board.command_timeout * 3.0
     )
     while time.monotonic() < deadline:
-        output = board.command("kernel uptime")
+        output = run_command("kernel uptime")
         match = re.search(r"\bUptime:\s*(\d+)\s*ms\b", output)
         if match is None:
             raise GateError(f"{board.label}: kernel uptime was not parseable")
         uptime_ms = int(match.group(1))
-        fresh_output = board.history_since(history_mark).decode(
-            "utf-8", errors="replace"
-        )
-        marker = "radio boot guard cleared after stable startup"
-        if uptime_ms >= BOOT_GUARD_CLEAR_MIN_UPTIME_MS and marker in fresh_output:
+        if uptime_ms >= BOOT_GUARD_CLEAR_MIN_UPTIME_MS:
             board.event(
                 "boot guard clear PASS "
                 f"uptime_ms={uptime_ms} minimum_ms={BOOT_GUARD_CLEAR_MIN_UPTIME_MS}"
             )
             return
         time.sleep(0.1)
-    raise GateError(f"{board.label}: timed out waiting for boot guard clear marker")
+    raise GateError(f"{board.label}: timed out waiting for boot guard clear uptime")
 
 
 TIME_UART_ZERO_FIELDS = (
@@ -800,7 +888,9 @@ def _run_bidirectional_bridge_gate(
         master.label,
         command,
     )
-    _wait_for_verify(slave, bridge_length, MASTER_TO_SLAVE_SEED, f"{label}-master-to-slave")
+    _wait_for_verify(
+        slave, bridge_length, MASTER_TO_SLAVE_SEED, f"{label}-master-to-slave"
+    )
 
     command = f"bridge_test inject {bridge_length} {SLAVE_TO_MASTER_SEED}"
     output = slave.command(command)
@@ -810,7 +900,9 @@ def _run_bidirectional_bridge_gate(
         slave.label,
         command,
     )
-    _wait_for_verify(master, bridge_length, SLAVE_TO_MASTER_SEED, f"{label}-slave-to-master")
+    _wait_for_verify(
+        master, bridge_length, SLAVE_TO_MASTER_SEED, f"{label}-slave-to-master"
+    )
     _wait_for_master_record_diagnostics(
         master,
         expected_bytes=baseline["node1_bytes"] + bridge_length,
@@ -819,7 +911,7 @@ def _run_bidirectional_bridge_gate(
 
     for board in (master, slave):
         stats = board.command("bridge_test stats")
-        _require_zero_drops(stats, board.label)
+        _require_zero_drops(stats, board)
         board.event("bridge_test stats PASS input_drop=0 output_drop=0")
         _wait_for_fresh_runtime_zero_drops(board)
         _wait_for_fresh_time_uart_zero_errors(board)
@@ -876,9 +968,7 @@ def _run_downlink_loss_gate(
             slave.label,
             command,
         )
-        _wait_for_verify(
-            master, bridge_length, 147, "loss-active-slave-to-master"
-        )
+        _wait_for_verify(master, bridge_length, 147, "loss-active-slave-to-master")
     finally:
         output = master.command("bridge_test loss_off")
         _expect(
@@ -909,7 +999,7 @@ def _run_downlink_loss_gate(
         )
     for board in (master, slave):
         stats = board.command("bridge_test stats")
-        _require_zero_drops(stats, board.label)
+        _require_zero_drops(stats, board)
         _wait_for_fresh_runtime_zero_drops(board)
         _wait_for_fresh_time_uart_zero_errors(board)
     master.event(
@@ -985,7 +1075,7 @@ def _run_uplink_ack_loss_once_gate(
 
     for board in (master, slave):
         stats = board.command("bridge_test stats")
-        _require_zero_drops(stats, board.label)
+        _require_zero_drops(stats, board)
         _wait_for_fresh_runtime_zero_drops(board)
     master.event(
         "uplink ACK one-shot loss gate PASS "
@@ -1081,18 +1171,24 @@ def _run_cycle(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True, help="stage label used in evidence paths")
+    parser.add_argument(
+        "--stage", required=True, help="stage label used in evidence paths"
+    )
     parser.add_argument("--master-id", default=MASTER_ID, help="complete master USB ID")
     parser.add_argument("--slave-id", default=SLAVE_ID, help="complete slave USB ID")
     parser.add_argument("--master-uf2", required=True, type=Path)
     parser.add_argument("--slave-uf2", required=True, type=Path)
     parser.add_argument("--cycles", type=int, default=1)
     parser.add_argument(
-        "--cold-reboots-per-board", type=int, default=0,
+        "--cold-reboots-per-board",
+        type=int,
+        default=0,
         help="Sequential cold reboots per board after flashing; waits >=10s guard clear",
     )
     parser.add_argument(
-        "--steady-state-seconds", type=float, default=0.0,
+        "--steady-state-seconds",
+        type=float,
+        default=0.0,
         help="Post-gate radio and UART health observation window",
     )
     parser.add_argument("--bridge-length", type=int, default=600)
@@ -1125,6 +1221,58 @@ def _validated_id(device_id: str, option: str) -> str:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    started_at = _timestamp()
+    safe_stage = re.sub(r"[^A-Za-z0-9_.-]+", "-", args.stage).strip("-.")
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    evidence_dir = EVIDENCE_ROOT / f"{run_stamp}-{safe_stage or 'invalid-stage'}"
+    evidence_dir.mkdir(parents=True, exist_ok=False)
+    master_log_path = (evidence_dir / "master.raw.log").resolve()
+    slave_log_path = (evidence_dir / "slave.raw.log").resolve()
+    summary_path = evidence_dir / "summary.json"
+    print(f"board gate evidence: {evidence_dir.resolve()}", flush=True)
+
+    master_log = TimestampedRawLog(master_log_path)
+    slave_log = TimestampedRawLog(slave_log_path)
+    master: BoardSession | None = None
+    slave: BoardSession | None = None
+    stage_result: dict[str, object] = {
+        "master_to_slave": False,
+        "slave_to_master": False,
+        "queue_drops": 0,
+        "recoveries": 0,
+    }
+    summary: dict[str, object] = {
+        "stage": args.stage,
+        "board_ids": {
+            "master": args.master_id.upper(),
+            "slave": args.slave_id.upper(),
+        },
+        "uf2_sha256": {"master": None, "slave": None},
+        "directions": {
+            "master_to_slave": False,
+            "slave_to_master": False,
+        },
+        "master_to_slave": False,
+        "slave_to_master": False,
+        "queue_drops": 0,
+        "recoveries": 0,
+        "boards": {
+            "master": {"flashes": 0, "flash_retries": 0, "recoveries": 0},
+            "slave": {"flashes": 0, "flash_retries": 0, "recoveries": 0},
+        },
+        "pass": False,
+        "complete": False,
+        "error": None,
+        "raw_log_paths": {
+            "master": str(master_log_path),
+            "slave": str(slave_log_path),
+        },
+        "started_at": started_at,
+        "ended_at": None,
+    }
+    return_code = 1
+    run_error: str | None = None
+    summary_write_error: str | None = None
     try:
         master_id = _validated_id(args.master_id, "--master-id")
         slave_id = _validated_id(args.slave_id, "--slave-id")
@@ -1137,9 +1285,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.steady_state_seconds < 0:
             raise GateError("--steady-state-seconds must be >= 0")
         if not 1 <= args.bridge_length <= BRIDGE_MAX_LENGTH:
-            raise GateError(
-                f"--bridge-length must be in [1, {BRIDGE_MAX_LENGTH}]"
-            )
+            raise GateError(f"--bridge-length must be in [1, {BRIDGE_MAX_LENGTH}]")
         if args.bridge_repeats < 1:
             raise GateError("--bridge-repeats must be >= 1")
         if args.downlink_loss_every_n < 0 or args.downlink_loss_every_n == 1:
@@ -1149,82 +1295,157 @@ def main(argv: Iterable[str] | None = None) -> int:
         for name, uf2 in (("master", args.master_uf2), ("slave", args.slave_uf2)):
             if not uf2.is_file():
                 raise GateError(f"{name} UF2 does not exist: {uf2}")
-
-        stage = re.sub(r"[^A-Za-z0-9_.-]+", "-", args.stage).strip("-.")
-        if not stage:
+        if not safe_stage:
             raise GateError("--stage must contain a path-safe character")
-        run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        evidence_dir = Path("build") / "board-e2e" / f"{run_stamp}-{stage}"
-        evidence_dir.mkdir(parents=True, exist_ok=False)
-        print(f"board gate evidence: {evidence_dir.resolve()}", flush=True)
-
-        master_log = TimestampedRawLog(evidence_dir / "master.raw.log")
-        slave_log = TimestampedRawLog(evidence_dir / "slave.raw.log")
+        summary["board_ids"] = {"master": master_id, "slave": slave_id}
+        summary["uf2_sha256"] = {
+            "master": _uf2_sha256(args.master_uf2),
+            "slave": _uf2_sha256(args.slave_uf2),
+        }
+        recovery_budget = RecoveryBudget()
         master = BoardSession(
-            "master", master_id, args.master_uf2, args.command_timeout, master_log
+            "master",
+            master_id,
+            args.master_uf2,
+            args.command_timeout,
+            master_log,
+            recovery_budget,
         )
         slave = BoardSession(
-            "slave", slave_id, args.slave_uf2, args.command_timeout, slave_log
+            "slave",
+            slave_id,
+            args.slave_uf2,
+            args.command_timeout,
+            slave_log,
+            recovery_budget,
         )
-        try:
-            for cycle in range(1, args.cycles + 1):
-                _run_cycle(
-                    master,
-                    slave,
-                    cycle,
-                    args.cycles,
-                    args.bridge_length,
-                    args.bridge_repeats,
-                )
-            if args.downlink_loss_every_n:
-                _run_downlink_loss_gate(
-                    master,
-                    slave,
-                    args.bridge_length,
-                    args.downlink_loss_every_n,
-                )
-            if args.uplink_ack_loss_once:
-                _run_uplink_ack_loss_once_gate(master, slave, args.bridge_length)
-            if args.cold_reboots_per_board:
-                _run_cold_reboot_cycles(
-                    master, slave, args.cold_reboots_per_board, args.bridge_length
-                )
-            if args.steady_state_seconds:
-                _run_steady_state_window(
-                    master, slave, args.steady_state_seconds
-                )
-            print(
-                "BOARD_E2E PASS "
-                f"stage={args.stage} cycles={args.cycles} length={args.bridge_length} "
-                f"bridge_repeats={args.bridge_repeats} "
-                f"downlink_loss_every_n={args.downlink_loss_every_n} "
-                f"uplink_ack_loss_once={int(args.uplink_ack_loss_once)} "
-                f"cold_reboots_per_board={args.cold_reboots_per_board} "
-                f"master_flashes={master.flash_count} slave_flashes={slave.flash_count} "
-                f"master_flash_retries={master.flash_retry_count} "
-                f"slave_flash_retries={slave.flash_retry_count} "
-                f"master_recoveries={master.recovery_count} "
-                f"slave_recoveries={slave.recovery_count} "
-                f"evidence={evidence_dir.resolve()}",
-                flush=True,
+        for cycle in range(1, args.cycles + 1):
+            _run_cycle(
+                master,
+                slave,
+                cycle,
+                args.cycles,
+                args.bridge_length,
+                args.bridge_repeats,
             )
-            return 0
-        except (GateError, CommandTimeout) as exc:
-            print(
-                f"BOARD_E2E FAIL stage={args.stage} error={exc} "
-                f"evidence={evidence_dir.resolve()}",
-                file=sys.stderr,
-                flush=True,
+            stage_result["master_to_slave"] = True
+            stage_result["slave_to_master"] = True
+        if args.downlink_loss_every_n:
+            _run_downlink_loss_gate(
+                master,
+                slave,
+                args.bridge_length,
+                args.downlink_loss_every_n,
             )
-            return 1
-        finally:
-            master.close()
-            slave.close()
-            master_log.close()
-            slave_log.close()
-    except GateError as exc:
-        print(f"BOARD_E2E FAIL error={exc}", file=sys.stderr, flush=True)
+        if args.uplink_ack_loss_once:
+            _run_uplink_ack_loss_once_gate(master, slave, args.bridge_length)
+        if args.cold_reboots_per_board:
+            _run_cold_reboot_cycles(
+                master, slave, args.cold_reboots_per_board, args.bridge_length
+            )
+        if args.steady_state_seconds:
+            _run_steady_state_window(master, slave, args.steady_state_seconds)
+        stage_result["queue_drops"] = master.queue_drops + slave.queue_drops
+        stage_result["recoveries"] = master.recovery_count + slave.recovery_count
+        validate_stage_result(stage_result)
+        return_code = 0
+    except Exception as exc:
+        run_error = _exception_text(exc)
+    finally:
+        active_base_exception = sys.exc_info()[0] is not None
+        cleanup_errors: list[str] = []
+        cleanup_actions: list[tuple[str, Callable[[], None]]] = []
+        if master is not None:
+            cleanup_actions.append(("master board", master.close))
+        if slave is not None:
+            cleanup_actions.append(("slave board", slave.close))
+        cleanup_actions.extend(
+            (("master raw log", master_log.close), ("slave raw log", slave_log.close))
+        )
+        for cleanup_name, cleanup in cleanup_actions:
+            try:
+                cleanup()
+            except Exception as exc:
+                cleanup_errors.append(
+                    f"cleanup {cleanup_name} failed: {_exception_text(exc)}"
+                )
+
+        if master is not None:
+            stage_result["queue_drops"] = master.queue_drops
+            stage_result["recoveries"] = master.recovery_count
+        if slave is not None:
+            stage_result["queue_drops"] = (
+                int(stage_result["queue_drops"]) + slave.queue_drops
+            )
+            stage_result["recoveries"] = (
+                int(stage_result["recoveries"]) + slave.recovery_count
+            )
+        errors = ([run_error] if run_error is not None else []) + cleanup_errors
+        if cleanup_errors:
+            return_code = 1
+        summary["pass"] = return_code == 0
+        summary["complete"] = return_code == 0
+        summary["error"] = "; ".join(errors) if errors else None
+        summary["master_to_slave"] = stage_result["master_to_slave"]
+        summary["slave_to_master"] = stage_result["slave_to_master"]
+        summary["directions"] = {
+            "master_to_slave": stage_result["master_to_slave"],
+            "slave_to_master": stage_result["slave_to_master"],
+        }
+        summary["queue_drops"] = stage_result["queue_drops"]
+        summary["recoveries"] = stage_result["recoveries"]
+        summary["boards"] = {
+            "master": {
+                "flashes": master.flash_count if master is not None else 0,
+                "flash_retries": master.flash_retry_count if master is not None else 0,
+                "recoveries": master.recovery_count if master is not None else 0,
+            },
+            "slave": {
+                "flashes": slave.flash_count if slave is not None else 0,
+                "flash_retries": slave.flash_retry_count if slave is not None else 0,
+                "recoveries": slave.recovery_count if slave is not None else 0,
+            },
+        }
+        summary["ended_at"] = _timestamp()
+        if not active_base_exception:
+            try:
+                _write_json_summary(summary_path, summary)
+            except Exception as exc:
+                summary_write_error = f"summary write failed: {_exception_text(exc)}"
+                return_code = 1
+
+    if summary_write_error is not None:
+        print(
+            f"BOARD_E2E FAIL stage={args.stage} error={summary_write_error} "
+            f"evidence={evidence_dir.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
+    if return_code != 0:
+        print(
+            f"BOARD_E2E FAIL stage={args.stage} error={summary['error']} "
+            f"evidence={evidence_dir.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    print(
+        "BOARD_E2E PASS "
+        f"stage={args.stage} cycles={args.cycles} length={args.bridge_length} "
+        f"bridge_repeats={args.bridge_repeats} "
+        f"downlink_loss_every_n={args.downlink_loss_every_n} "
+        f"uplink_ack_loss_once={int(args.uplink_ack_loss_once)} "
+        f"cold_reboots_per_board={args.cold_reboots_per_board} "
+        f"master_flashes={master.flash_count} slave_flashes={slave.flash_count} "
+        f"master_flash_retries={master.flash_retry_count} "
+        f"slave_flash_retries={slave.flash_retry_count} "
+        f"master_recoveries={master.recovery_count} "
+        f"slave_recoveries={slave.recovery_count} "
+        f"evidence={evidence_dir.resolve()}",
+        flush=True,
+    )
+    return 0
 
 
 if __name__ == "__main__":

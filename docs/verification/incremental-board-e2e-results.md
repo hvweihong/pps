@@ -791,6 +791,144 @@ session/filter/counter 修改之前执行。最终固件重新运行固定 ID �
 ### Verification boundary
 
 本阶段通过板上 counter 与无线同步证明固定 1 Hz/100 ms PPS scheduler 持续运行，但仍没有示波器
-或外部 PPS/GNSS fixture，因此不声明 `<=20 us` 电气相位精度。真实物理 UART 双向数据将在下一阶段
-使用本机 `/dev/ttyACM2` 与 adb 端 `/dev/ttyS1` 单独验证；本阶段的 600-byte 链路仍使用 validation
-CDC injection/capture。
+或外部 PPS/GNSS fixture，因此不声明 `<=20 us` 电气相位精度。本阶段的 600-byte 链路使用
+validation CDC injection/capture；后续 Stage 8 另行记录 `/dev/ttyACM2` 与 adb `/dev/ttyS1`
+物理 UART 双向验证。
+
+## Stage 8 — Automated recovery, CDC regression and physical UART validation
+
+执行日期：2026-08-09。基线为 Stage 7 提交 `a5b0c7e`。本阶段把双板 runner 收紧为
+fail-closed 自动化 gate：只接受完整 USB ID，刷写前等待 boot guard，应用/UF2 重枚举有界，
+整轮普通 command timeout 只允许一次受影响板重刷和一次重试；PASS/FAIL 都保存带时间戳 raw logs
+和机器可读 `summary.json`。
+
+### Host/build evidence
+
+- Python board/flash suite：最终 **69/69 PASS**；新增方向、queue drop、双板共享 recovery 上限、失败
+  summary、boot-guard、exact-ID 重枚举和失败计数测试。
+- TDD 修复 queue-drop summary：失败 gate 观测 `input_drop=2 output_drop=3` 时，回归先证明
+  JSON 错误写成 0，修复后记录 5。
+- 规格审查发现 recovery 内 boot-guard 查询会递归进入 recovery；新增回归先复现
+  `RecursionError`，随后改为 bounded non-recovering probe，嵌套 timeout 直接传播。
+- 双板共享 recovery budget 在 TDD 回归中先证明第二块板会发生不必要的第二次重刷，修复后第二次
+  recovery 在刷写前 fail closed，并在 summary 中标明触发板标签。
+- 同一轮把第二次 flash 即使失败也计为一次 retry，保证 incomplete summary 的计数真实。
+- bridge native suite：**135/135 PASS**；sync native suite：**16/16 PASS**；time-UART native
+  suite：**2/2 PASS**。当前 west 使用
+  sysbuild，实际可执行文件路径分别为
+  `build/tests/bridge_logic/bridge_logic/zephyr/zephyr.exe` 和
+  `build/tests/sync_logic/sync_logic/zephyr/zephyr.exe`、
+  `build/tests/time_uart_logic/time_uart_logic/zephyr/zephyr.exe`。13 个 active static checks PASS，
+  15 个 retired BLE/MPSL checks 明确 SKIP；host evidence 位于
+  `build/host-regression/20260809T121849.611980452Z/`。
+- final pristine production build：FLASH `175620 B`、RAM `188532 B`、UF2 `351744 B`，
+  SHA-256 `5f7c5e556248dec771f5a5018881ef8b208063332ccd26bb603205a5c8fc5218`；final
+  pristine standard validation build：FLASH `180196 B`、RAM `192692 B`、UF2 `360448 B`，
+  SHA-256 `19b504ef4248be178ebbe6b30f91a40d20b80b7ac3186b6281346f7c5a4d54db`。
+  构建日志和哈希位于
+  `build/host-regression/20260809T122417.765247398Z-final-builds/`。
+- loss validation build：UF2 `362496 B`，SHA-256
+  `1d0a5278799b32a45fdb56ec28200f79b4f4a5e7957c9a6f4d8e5478e621df14`。
+
+### Five-cycle, cold-reboot and steady-state matrix
+
+执行命令：
+
+```sh
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage8-final-five-cycle-cold \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/task8-validation-master/zephyr/zephyr.uf2 \
+  --slave-uf2 build/task8-validation-slave/zephyr/zephyr.uf2 \
+  --cycles 5 --bridge-length 600 \
+  --cold-reboots-per-board 1 --steady-state-seconds 30
+```
+
+- **`BOARD_E2E PASS`** after 167.4 s。
+- 两板各完成 5 次 exact-ID flash；总计 10 次刷写均为 attempt 1/2，零 retry、零 command
+  recovery。
+- 五轮 master→slave 与 slave→master 600-byte exact verify 全部 PASS。
+- master 和 slave 分别 cold reboot 一次，另一板保持供电；两次均在 boot guard clear 后恢复
+  `active_count=1`/`LOCKED`，随后再次双向 600-byte exact verify PASS。
+- 30 s steady-state window 内持续 `active_count=1`/`LOCKED`，validation/runtime/time-UART
+  queue/drop/error 均为 0。
+- Authoritative evidence：
+  `build/board-e2e/20260809T114218.836090Z-stage8-final-five-cycle-cold/summary.json`、
+  同目录 `master.raw.log` 与 `slave.raw.log`。
+
+### Loss-injection matrix
+
+测试专用镜像启用 `loss-validation.conf`，执行：
+
+```sh
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage stage8-loss-every-third \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/task8-loss-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/task8-loss-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 --downlink-loss-every-n 3
+```
+
+- **`BOARD_E2E PASS`** after 35.6 s，零 retry/recovery/drop。
+- 无 loss 时先完成双向 600-byte exact verify。
+- master 每 3 个 DOWNLINK_DATA 丢 1 个，slave `downlink_gap` 从 0 增至 2；没有 repair/skip
+  行为，loss active 时 slave→master 600-byte 上行仍 exact verify。
+- `loss_off` 后 master→slave 新 600-byte pattern 立即 exact verify。
+- Evidence：`build/board-e2e/20260809T114550.394963Z-stage8-loss-every-third/`。
+
+### Physical UART fixture result
+
+接线为 `/dev/ttyACM2 <-> DBE5C3D84EA2EC6F`，adb Linux `/dev/ttyS1 <->
+5B3D71D27A709CA2`，115200 8N1、共地。最终交换 slave RX/TX 后：
+
+- `/dev/ttyACM2 -> master -> wireless -> slave -> /dev/ttyS1` 精确接收 **600/600 bytes**，
+  expected/received SHA-256 均为
+  `d55289f980908b2efc0c91cf1fa8f2b6eb8875c5cde63dd3bfa77aa1cb66b25f`；
+- `/dev/ttyS1 -> slave -> wireless -> master -> /dev/ttyACM2` 精确接收 **600/600 bytes**，
+  expected/received SHA-256 均为
+  `19dfa0278440a177dc0deb21b4bb7885dc0fc4dbaa7885660b371fde09dfc546`；
+- 两板 `uart_record_queued == uart_record_completed`，所有 validation/runtime UART
+  drop/start-error 为 0。
+
+旧 Android adb daemon 不支持 `exec-out` 或无 PTY 的 `shell -T`，直接运行会以 `error: closed`
+退出；最终 fixture 在 adb 边界使用 base64 编解码，避免 PTY 修改任意二进制字节。权威证据为
+`build/board-e2e/20260809T121119.979594326Z-physical-uart-after-rewire/physical-uart-pty-summary.json`
+及同目录 expected/received 二进制文件和 raw logs。
+
+### Controlled command-timeout recovery
+
+在固定 master `DBE5C3D84EA2EC6F` 上把第一次真实 CDC `kernel uptime` 读取 deadline 压缩到
+必然超时，随后使用正式恢复路径：
+
+- first attempt 记录 `command timeout attempt 1/2` 与 receive tail；
+- 标准 UF2 SHA-256 为
+  `19b504ef4248be178ebbe6b30f91a40d20b80b7ac3186b6281346f7c5a4d54db`；
+- 自动恢复只重刷 **1** 次、flash retry **0**，CDC exact-ID 重新枚举后第二次 `kernel uptime`
+  返回有效 `Uptime:`；
+- 无需人工双击或拔插。
+
+Evidence：
+`build/board-e2e/20260809T122004.903212688Z-controlled-real-timeout-recovery/summary.json`
+及同目录 `master.raw.log`。
+
+### Final standard-firmware restore gate
+
+完成 loss/恢复测试后，两板均恢复为 SHA-256
+`19b504ef4248be178ebbe6b30f91a40d20b80b7ac3186b6281346f7c5a4d54db` 的标准 validation
+固件，并执行最终门禁：
+
+- 两板各 exact-ID flash 1 次，均为 attempt 1/2；零 flash retry、零 recovery；
+- 角色保持 master `0` / slave `1`，`active_count=1`，slave `LOCKED`；
+- 初始和逐板 cold reboot 后 master→slave、slave→master 600-byte exact verify 均 PASS；
+- 10 s steady state 内两板 validation/runtime/time-UART queue/drop/error 均为 0。
+
+Evidence：
+`build/board-e2e/20260809T122041.411088Z-stage8-final-standard-restore-post-rewire/summary.json`
+及同目录 raw logs。
+
+### Remaining external acceptance boundary
+
+- 真实 GNSS NMEA + PPS 驯服；
+- 示波器确认 1 Hz、100 ms 脉宽；
+- external locked 状态下确认两板 PPS 上升沿相位误差 `<=20 us`；
+- 三块真实 slave 的并发 record/round-robin 压力测试。
