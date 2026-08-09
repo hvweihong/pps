@@ -34,11 +34,34 @@ The approved design covers several coupled areas, so the tasks below are
 organized as independently testable sub-projects. Each sub-project ends in a
 separate commit and can be stopped or reverted without losing earlier stages.
 
+## Mandatory hardware gate for every task
+
+Tasks 1–8 each have a board gate before their commit. The gate always uses the
+fixed USB IDs `DBE5C3D84EA2EC6F` (master) and `5B3D71D27A709CA2` (slave), never
+`ttyACM` numbering. It must:
+
+1. build a fresh validation UF2 from the current uncommitted stage;
+2. flash both exact IDs with one automatic retry;
+3. ensure NVS roles are master `role_id=0` and slave `role_id=1`;
+4. capture startup/status logs from both CDC ports;
+5. run a bidirectional 600-byte CDC bridge smoke test unless the task changes
+   the bridge protocol and supplies a more specific replacement;
+6. run the task-specific hardware assertion listed in that task;
+7. recover one command timeout by reflashing only the affected exact ID;
+8. append commands, firmware SHA/dirty marker, counters, and PASS/FAIL evidence
+   to `docs/verification/incremental-board-e2e-results.md`.
+
+A task is not committed and the next task does not start until both its host
+tests and hardware gate pass. External-PPS electrical phase measurement remains
+a separate final gate because the two boards are currently connected only by
+USB; local/UTC state transitions are exercised on-board through validation-only
+CDC injection until a PPS jumper/GNSS/scope fixture is connected.
+
 ---
 
-### Task 1: Establish the clean implementation baseline
+### Task 1: Establish the clean baseline and reusable hardware gate
 
-**Files:** Read-only `git`, `docs/superpowers/specs/2026-08-09-dual-board-time-sync-uart-bridge-design.md`, `build.sh`, `CMakeLists.txt`, `tests/bridge_logic/`, `tests/sync_logic/`.
+**Files:** Read-only `git`, `docs/superpowers/specs/2026-08-09-dual-board-time-sync-uart-bridge-design.md`, `build.sh`, `CMakeLists.txt`, `tests/bridge_logic/`, `tests/sync_logic/`; create `tools/board_e2e.py`, `tests/test_board_e2e.py`; modify `docs/verification/incremental-board-e2e-results.md`.
 
 - [ ] **Step 1: Verify the approved design commit and clean workspace**
 
@@ -72,14 +95,91 @@ for check in tests/*_static_check.sh; do bash "$check"; done
 Expected: bridge 93/93 and sync 15/15 (or the current test counts printed by
 the suites), all active static checks pass, and no baseline behavior is changed.
 
-- [ ] **Step 3: Commit the baseline record**
+- [ ] **Step 3: Write failing fixed-ID hardware-runner tests**
+
+Add Python unit tests for exact-ID discovery, command timeout capture, one-board
+recovery, and refusal to fall back to a tty number:
+
+```python
+def test_resolve_port_uses_complete_usb_id(self):
+    self.assertEqual(
+        board_e2e.resolve_serial("DBE5C3D84EA2EC6F", self.serial_by_id),
+        self.master_link,
+    )
+
+def test_ambiguous_or_missing_id_fails_closed(self):
+    with self.assertRaises(board_e2e.GateError):
+        board_e2e.resolve_serial("DBE5", self.serial_by_id)
+
+def test_command_timeout_records_tail_before_reflash(self):
+    run_once = mock.Mock(side_effect=[board_e2e.CommandTimeout("last-bytes"), "ok"])
+    recover = mock.Mock()
+    log = io.StringIO()
+    self.assertEqual(
+        board_e2e.run_command_with_recovery(run_once, recover, log, "kernel uptime"),
+        "ok",
+    )
+    recover.assert_called_once_with()
+    self.assertIn("last-bytes", log.getvalue())
+
+def test_second_timeout_exits_without_looping_forever(self):
+    run_once = mock.Mock(side_effect=board_e2e.CommandTimeout("stalled"))
+    recover = mock.Mock()
+    with self.assertRaises(board_e2e.CommandTimeout):
+        board_e2e.run_command_with_recovery(
+            run_once, recover, io.StringIO(), "bridge_test stats"
+        )
+    recover.assert_called_once_with()
+```
+
+Mock serial and `tools.flash_uf2.flash_once()`. Run:
+
+```bash
+/home/hv/ncs/.venv/bin/python -m unittest -v tests/test_board_e2e.py
+```
+
+Expected: import or missing-symbol failure before `tools/board_e2e.py` exists.
+
+- [ ] **Step 4: Implement the reusable stage gate**
+
+`tools/board_e2e.py` defines `GateError`, `CommandTimeout`, `resolve_serial()`,
+and `run_command_with_recovery()` with the signatures exercised above. It
+accepts explicit IDs, UF2 paths, stage name, cycle count,
+command timeout, and bridge length. It reuses
+`tools.flash_uf2.serial_port_for()`/`flash_once()`, captures raw per-board logs,
+sets/checks roles, runs `kernel uptime`, `bridge_test clear`, inject/verify in
+both directions, and retries exactly once after a timeout. It exits non-zero on
+wrong role, wrong ID, missing prompt, verification mismatch, queue drop, or a
+second timeout.
+
+- [ ] **Step 5: Run the baseline hardware gate**
+
+Build and run:
+
+```bash
+./build.sh master -d build/stage1-validation -- \
+  -DOVERLAY_CONFIG=validation.conf
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage baseline \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage1-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage1-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600
+```
+
+Expected: both exact IDs re-enumerate, roles are restored, both 600-byte
+directions verify exactly, sync returns to `LOCKED`, and no queue drop or manual
+reset is required.
+
+- [ ] **Step 6: Commit the baseline record and hardware runner**
 
 Append the exact commands, test counts, toolchain paths, and `git rev-parse
 HEAD` to `docs/verification/incremental-board-e2e-results.md`, then commit:
 
 ```bash
-git add docs/verification/incremental-board-e2e-results.md
-git commit -m "test: record approved implementation baseline"
+git add tools/board_e2e.py tests/test_board_e2e.py \
+  docs/verification/incremental-board-e2e-results.md
+git commit -m "test: add reusable dual-board hardware stage gate"
 ```
 
 ---
@@ -199,7 +299,7 @@ Keep GPIO, UART, and Zephyr calls out of this module. The phase-reset callback
 receives a future local tick and is responsible for the existing `pps_output`
 500 µs arm-ahead constraint.
 
-- [ ] **Step 5: Run the focused native tests and commit**
+- [ ] **Step 5: Run the focused native tests**
 
 Run:
 
@@ -211,11 +311,21 @@ ZEPHYR_BASE=/home/hv/ncs/zephyr \
 ```
 
 Expected: parser and UTC state tests pass; existing bridge tests remain green.
-Commit:
+
+- [ ] **Step 6: Run the task-2 dual-board hardware gate**
+
+Build the validation image with the new pure modules linked, then run
+`tools/board_e2e.py --stage nmea-utc-pure --cycles 1 --bridge-length 600` with
+the two fixed IDs and the new UF2. Require both directions exact, slave sync
+`LOCKED`, both boards responsive for 30 seconds, and no new watchdog/reset or
+queue-drop counters. Record the results in the verification document.
+
+- [ ] **Step 7: Commit the pure time model stage**
 
 ```bash
 git add src/nmea_parser.* src/utc_clock.* tests/bridge_logic/src/test_nmea_parser.c \
-  tests/bridge_logic/src/test_utc_clock.c tests/bridge_logic/CMakeLists.txt
+  tests/bridge_logic/src/test_utc_clock.c tests/bridge_logic/CMakeLists.txt \
+  docs/verification/incremental-board-e2e-results.md
 git commit -m "feat: add external NMEA UTC clock state machine"
 ```
 
@@ -320,12 +430,22 @@ bash tests/time_uart_static_check.sh
 Expected: checks pass, both UF2 images are generated, and the build DTS shows
 UART1 RX on P0.05 and PPS input on P0.02.
 
-- [ ] **Step 6: Commit the hardware time-source stage**
+- [ ] **Step 6: Run the task-3 dual-board hardware gate**
+
+Flash the fresh validation UF2 to both exact IDs and run the standard 600-byte
+bidirectional smoke test. Require UART0 bridge RX/TX to remain functional,
+slave sync to return to `LOCKED`, `uart_rx_restart_errors=0`, and five cold
+reboots per board without pinctrl, watchdog, or enumeration failures. This
+stage has no external PPS wire, so the task-specific assertion is absence of
+UART0/PPS/UART1 resource conflicts on real hardware.
+
+- [ ] **Step 7: Commit the hardware time-source stage**
 
 ```bash
 git add boards/xiao_ble_nrf52840.overlay Kconfig prj.conf CMakeLists.txt \
   src/timebase.* src/pps_input.* src/time_uart.* \
-  tests/pps_input_static_check.sh tests/time_uart_static_check.sh
+  tests/pps_input_static_check.sh tests/time_uart_static_check.sh \
+  docs/verification/incremental-board-e2e-results.md
 git commit -m "feat: add external PPS capture and NMEA UART input"
 ```
 
@@ -333,7 +453,7 @@ git commit -m "feat: add external PPS capture and NMEA UART input"
 
 ### Task 4: Propagate UTC and integrate time-source states
 
-**Files:** Modify `src/link_protocol.[ch]`, `src/link_scheduler_core.[ch]`, `src/wireless_time_sync.[ch]`, `src/bridge_runtime.[ch]`, `src/main.c`, `src/status.[ch]`, `CMakeLists.txt`; modify `tests/bridge_logic/src/test_link_protocol.c`, `test_master_scheduler.c`, `test_slave_scheduler.c`, `test_wireless_time_sync.c`, `tests/sync_logic/src/main.c`.
+**Files:** Modify `src/link_protocol.[ch]`, `src/link_scheduler_core.[ch]`, `src/wireless_time_sync.[ch]`, `src/bridge_runtime.[ch]`, `src/main.c`, `src/status.[ch]`, `src/param_defs.h`, `src/param_config.c`, `src/bridge_validation_shell.c`, `Kconfig`, `CMakeLists.txt`; modify `tests/bridge_logic/src/test_link_protocol.c`, `test_master_scheduler.c`, `test_slave_scheduler.c`, `test_wireless_time_sync.c`, `tests/sync_logic/src/main.c`.
 
 - [ ] **Step 1: Write failing protocol tests**
 
@@ -381,6 +501,11 @@ the default to `UTC_INVALID` and zero seconds so local mode remains explicit.
 
 - [ ] **Step 4: Integrate the time source into runtime**
 
+Add the reboot-effective numeric parameters `time_source_mode` (`0=local`,
+`1=external`) and `pps_input_delay_us` (`0..1000`, default 0) so integration is
+not temporarily hardcoded. The later parameter task will harden fallback,
+locking, shell bytes handling, and all behavior flags.
+
 After parameters, `timebase_init`, and `pps_output_init`, initialize
 `rb_utc_clock` and `pps_input`; initialize `time_uart` only in external mode.
 In the bridge thread, poll captured PPS ticks and complete NMEA/PPS pairs in
@@ -392,6 +517,11 @@ In `runtime_apply_sync`, reject `frame.group_id != runtime_group_id` before
 session reset, discovery-slot calculation, counter updates, or
 `wireless_time_sync_slave_receive`. Apply the frame's UTC publication only after
 all protocol/group/session checks pass.
+
+Under `CONFIG_RADIO_BRIDGE_VALIDATION_CDC`, add `time_test pair <utc_seconds>`
+to submit one synthetic thread-context PPS/NMEA pair and `time_test source_lost`
+to age both external inputs by three seconds. These commands exercise the
+on-board state machine without claiming GPIO timing validation.
 
 - [ ] **Step 5: Fix filter drift and age handling**
 
@@ -408,12 +538,25 @@ Run both native suites and all active static checks. Expected: existing sync
 offset tests still pass, protocol round-trips pass, and local mode reports
 `UTC_INVALID`.
 
-- [ ] **Step 7: Commit the time synchronization stage**
+- [ ] **Step 7: Run the task-4 time-state hardware gate**
+
+On the master, persist `time_source_mode=1`, reboot, and require
+`EXTERNAL_ACQUIRING`/`UTC_INVALID` with no external wires. Use `time_test pair`
+three times with consecutive UTC seconds and require `LOCKED`; run
+`time_test source_lost` and require `HOLDOVER`; restore `time_source_mode=0`,
+reboot, and require `LOCAL`/`UTC_INVALID`. Throughout, the slave must continue
+1 Hz scheduling, recover wireless `LOCKED` after each master reboot, and pass
+the bidirectional 600-byte bridge smoke test. Record all state lines and reset
+counters.
+
+- [ ] **Step 8: Commit the time synchronization stage**
 
 ```bash
 git add src/link_protocol.* src/link_scheduler_core.* src/wireless_time_sync.* \
-  src/bridge_runtime.* src/main.c src/status.* tests/bridge_logic \
-  tests/sync_logic CMakeLists.txt
+  src/bridge_runtime.* src/main.c src/status.* src/param_defs.h \
+  src/param_config.c src/bridge_validation_shell.c tests/bridge_logic \
+  tests/sync_logic Kconfig CMakeLists.txt \
+  docs/verification/incremental-board-e2e-results.md
 git commit -m "feat: add UTC publication and external time-source states"
 ```
 
@@ -421,7 +564,7 @@ git commit -m "feat: add UTC publication and external time-source states"
 
 ### Task 5: Remove business downlink reliability while preserving control and uplink poll
 
-**Files:** Modify `src/link_protocol.[ch]`, `src/link_scheduler_core.[ch]`, `src/link_window.[ch]` only where required for compile/test compatibility, `src/bridge_runtime.c`, `src/radio_transport.c`, `src/status.[ch]`, `tests/bridge_logic/src/test_link_protocol.c`, `test_master_scheduler.c`, `test_slave_scheduler.c`, `tests/radio_transport_static_check.sh`.
+**Files:** Modify `src/link_protocol.[ch]`, `src/link_scheduler_core.[ch]`, `src/link_window.[ch]` only where required for compile/test compatibility, `src/bridge_runtime.c`, `src/radio_transport.c`, `src/bridge_validation_shell.c`, `src/status.[ch]`, `tests/bridge_logic/src/test_link_protocol.c`, `test_master_scheduler.c`, `test_slave_scheduler.c`, `tests/radio_transport_static_check.sh`; create `loss-validation.conf`.
 
 - [ ] **Step 1: Replace repair-oriented tests with fail-closed broadcast tests**
 
@@ -467,12 +610,19 @@ change.
 - [ ] **Step 5: Verify radio action semantics**
 
 Keep `action->no_ack = true` in `build_broadcast()` and add a static check that
-business downlink actions call `radio_transport_send(..., true, ...)`. Keep
+business downlink actions call
+`radio_transport_send(action->pipe, true, action->wire, action->wire_len)`.
+Keep
 selective auto-ACK enabled globally so ASSIGN and POLL control exchanges work;
 the payload-level `noack` bit, not a global ESB mode change, separates control
 from business data.
 
-- [ ] **Step 6: Run native/static verification and commit**
+Under validation and loss-injection configs, add `bridge_test loss
+<frame_type> <every_n>` and `bridge_test loss_off`. The command calls
+`radio_transport_loss_set()` and prints the active mask/rate so board logs prove
+the injected condition.
+
+- [ ] **Step 6: Run native/static verification**
 
 Run:
 
@@ -486,11 +636,24 @@ bash tests/radio_transport_static_check.sh
 
 Expected: no repair/skip action is generated under injected loss, control
 membership and uplink poll tests pass, and the native suite has no failures.
-Commit:
+
+- [ ] **Step 7: Run the task-5 broadcast hardware gate**
+
+Build with `validation.conf` plus `loss-validation.conf`. First run the standard
+600-byte bidirectional smoke with injection disabled. Then configure the master
+to drop every third `RB_FRAME_DOWNLINK_DATA`, inject multiple distinct 600-byte
+patterns, and require slave downlink gap/loss counters to increase while no
+repair or skip action appears. Disable loss injection and require the next
+600-byte pattern to verify exactly. Confirm slave→master polled uplink remains
+exact throughout and record all counters.
+
+- [ ] **Step 8: Commit the broadcast stage**
 
 ```bash
 git add src/link_protocol.* src/link_scheduler_core.* src/bridge_runtime.c \
-  src/radio_transport.c src/status.* tests/bridge_logic tests/radio_transport_static_check.sh
+  src/radio_transport.c src/bridge_validation_shell.c src/status.* \
+  tests/bridge_logic tests/radio_transport_static_check.sh loss-validation.conf \
+  docs/verification/incremental-board-e2e-results.md
 git commit -m "feat: make business downlink best-effort broadcast"
 ```
 
@@ -577,17 +740,29 @@ space is unavailable, leave the scheduler record queued and return on the next
 wake. CDC output capture records the accepted bytes but does not add a source
 header to the user-visible stream.
 
-- [ ] **Step 6: Run native and static verification, then commit**
+- [ ] **Step 6: Run native and static verification**
 
 Run the bridge native suite, `bash tests/uart_bridge_static_check.sh`, and the
 validation CDC configuration check. Expected: all existing exact 600-byte CDC
 tests remain green, record boundaries are preserved internally, and production
 builds contain no validation shell symbols.
 
+- [ ] **Step 7: Run the task-6 record-queue hardware gate**
+
+Flash both boards and run five bidirectional 600-byte cycles. Require the
+master diagnostic output to attribute all physical slave data to node 1,
+`node1_record_drop=0`, no partial record/drop counter, and no duplicate payload
+delivery even when the uplink ACK is deliberately lost once. Verify the UART TX
+descriptor completion/abort counters return to idle after every cycle. Native
+tests remain the three-slave proof because only one physical slave is attached.
+
+- [ ] **Step 8: Commit the record-queue stage**
+
 ```bash
 git add src/record_queue.* src/link_scheduler_core.* src/bridge_runtime.c \
   src/uart_bridge.* src/bridge_validation.* src/bridge_validation_shell.c \
-  CMakeLists.txt tests/bridge_logic tests/uart_bridge_static_check.sh
+  CMakeLists.txt tests/bridge_logic tests/uart_bridge_static_check.sh \
+  docs/verification/incremental-board-e2e-results.md
 git commit -m "feat: isolate slave uplink records and UART TX descriptors"
 ```
 
@@ -613,13 +788,13 @@ ZTEST(param_config, test_only_status_and_led_are_runtime)
 Update old expectations so aggregation/sync/slot/lease parameters are reboot
 effective and PPS width defaults to 100000 µs.
 
-- [ ] **Step 2: Add parameter descriptors and safe persistence**
+- [ ] **Step 2: Harden parameter descriptors and safe persistence**
 
-Add `RB_PARAM_TIME_SOURCE_MODE`, `RB_PARAM_TIME_UART_BAUDRATE`, and
-`RB_PARAM_PPS_INPUT_DELAY_US` with NVS IDs `0x1011`, `0x1012`, and `0x1013`.
-Use ranges `0..1`, `1200..115200`, and `0..1000` respectively. Set the default
-time source to local, default time UART to 9600, and all communication/time
-parameters to `RB_PARAM_FLAG_REBOOT_REQUIRED`.
+Verify the earlier `RB_PARAM_TIME_SOURCE_MODE`, `RB_PARAM_TIME_UART_BAUDRATE`,
+and `RB_PARAM_PPS_INPUT_DELAY_US` descriptors use stable NVS IDs `0x1011`,
+`0x1012`, and `0x1013`, ranges `0..1`, `1200..115200`, and `0..1000`, and
+defaults local, 9600, and 0. Set every communication/time parameter to
+`RB_PARAM_FLAG_REBOOT_REQUIRED`.
 
 Introduce `rb_param_persistence_available()` and make
 `rb_param_config_init()` mark the cache initialized even when
@@ -658,7 +833,7 @@ before session reset, discovery slot calculation, counters, or filter updates.
 Add a native test that delivers a validly encoded sync frame with a different
 group and asserts that state, sequence, and relock count do not change.
 
-- [ ] **Step 6: Run focused tests and commit**
+- [ ] **Step 6: Run focused tests**
 
 Run:
 
@@ -671,12 +846,25 @@ for check in tests/*_static_check.sh; do bash "$check"; done
 ```
 
 Expected: parameter defaults/fallback, bytes shell parsing, group filtering,
-and all existing bridge tests pass. Commit:
+and all existing bridge tests pass.
+
+- [ ] **Step 7: Run the task-7 parameter/group hardware gate**
+
+On both exact-ID boards, clear all relevant keys and confirm compiled defaults.
+Persist master/slave roles, UART baud, PPS width 100000, local time mode, group
+ID/key, reboot, and confirm every value reports `persisted` and reaches its
+actual consumer. Change only the slave to `group_id=2`, reboot, and require no
+membership or sync lock; restore `group_id=1`, reboot, and require rejoin,
+wireless `LOCKED`, and exact 600-byte traffic. Clear the test overrides before
+commit and record NVS/source flags.
+
+- [ ] **Step 8: Commit the parameter/group stage**
 
 ```bash
 git add Kconfig prj.conf src/param_* src/main.c src/bridge_runtime.c \
   src/uart_bridge.* src/heartbeat_led.* src/status.* tests/bridge_logic \
-  tests/param_fallback_static_check.sh tests/bridge_runtime_static_check.sh
+  tests/param_fallback_static_check.sh tests/bridge_runtime_static_check.sh \
+  docs/verification/incremental-board-e2e-results.md
 git commit -m "fix: make persisted parameters and group filtering effective"
 ```
 
@@ -684,30 +872,50 @@ git commit -m "fix: make persisted parameters and group filtering effective"
 
 ### Task 8: Add automated dual-board recovery and CDC regression
 
-**Files:** Create `tools/board_e2e.py`, `tests/test_board_e2e.py`, `tests/board_e2e_static_check.sh`; modify `tools/flash_uf2.py` only if a tested helper is missing; modify `src/bridge_validation_shell.c`, `src/status.c`, `docs/verification/incremental-board-e2e-results.md`, `README.md`.
+**Files:** Modify `tools/board_e2e.py`, `tests/test_board_e2e.py`; create `tests/board_e2e_static_check.sh`; modify `tools/flash_uf2.py` only if a tested helper is missing; modify `src/bridge_validation_shell.c`, `src/status.c`, `docs/verification/incremental-board-e2e-results.md`, `README.md`.
 
-- [ ] **Step 1: Test fixed-ID serial discovery helpers**
+- [ ] **Step 1: Test final stage-result aggregation**
 
-Add Python unit tests with temporary `/dev/serial/by-id` and UF2 disk trees:
+Extend the hardware runner tests so the final gate fails closed on either
+bridge direction, any queue drop, or more than one recovery:
 
 ```python
-def test_board_e2e_refuses_ambiguous_serial_id(): ...
-def test_board_e2e_reconnects_after_1200_baud_reset(): ...
-def test_board_e2e_records_timeout_before_recovery(): ...
+def test_stage_result_requires_both_bridge_directions(self):
+    with self.assertRaises(board_e2e.GateError):
+        board_e2e.validate_stage_result({
+            "master_to_slave": True,
+            "slave_to_master": False,
+            "queue_drops": 0,
+            "recoveries": 0,
+        })
+
+def test_stage_result_rejects_queue_drop(self):
+    with self.assertRaises(board_e2e.GateError):
+        board_e2e.validate_stage_result({
+            "master_to_slave": True,
+            "slave_to_master": True,
+            "queue_drops": 1,
+            "recoveries": 0,
+        })
+
+def test_stage_result_allows_one_recovery(self):
+    board_e2e.validate_stage_result({
+        "master_to_slave": True,
+        "slave_to_master": True,
+        "queue_drops": 0,
+        "recoveries": 1,
+    })
 ```
 
-Use the existing `tools.flash_uf2.serial_port_for()` and never select a board
-by `/dev/ttyACM0` or `/dev/ttyACM1`.
+Keep the existing fixed-ID resolver tests; never select a board by
+`/dev/ttyACM0` or `/dev/ttyACM1`.
 
-- [ ] **Step 2: Implement bounded log/command transactions**
+- [ ] **Step 2: Extend bounded transactions into a final report**
 
-`tools/board_e2e.py` must accept explicit master/slave IDs, serial baud, command
-timeout, cycle count, and validation UF2 paths. It opens each fixed-ID CDC
-port, sends one shell command at a time, waits for the command echo/result, and
-writes timestamped raw logs. On a command timeout it records the last received
-bytes, invokes `flash_uf2.py --device-id <id> --retry 1` for that board only,
-waits for application re-enumeration, and retries the command once. A second
-timeout exits non-zero with both board logs preserved.
+Add `validate_stage_result()` with the tested fields and make the runner emit a
+machine-readable JSON summary plus timestamped raw logs. Preserve the Task-1
+timeout behavior: one affected-board reflash and one retry only; a second
+timeout exits non-zero with both logs and the incomplete JSON summary saved.
 
 - [ ] **Step 3: Add validation commands for independent diagnostics**
 
