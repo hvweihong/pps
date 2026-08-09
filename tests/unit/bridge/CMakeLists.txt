@@ -3,7 +3,14 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(bridge_logic_tests)
 
-target_include_directories(app PRIVATE ../../src)
+target_include_directories(app PRIVATE
+	../../../src/app
+	../../../src/config
+	../../../src/bridge
+	../../../src/radio
+	../../../src/time
+	../../../src/validation
+)
 target_compile_definitions(app PRIVATE
 	CONFIG_RADIO_BRIDGE_GROUP_ID=1
 	CONFIG_RADIO_BRIDGE_GROUP_KEY="00112233445566778899aabbccddeeff"
@@ -23,7 +30,6 @@ target_compile_definitions(app PRIVATE
 	CONFIG_TIME_UART_BAUDRATE=9600
 )
 target_sources(app PRIVATE
-	src/test_config.c
 	src/test_link_protocol.c
 	src/test_byte_ring.c
 	src/test_record_queue.c
@@ -31,26 +37,13 @@ target_sources(app PRIVATE
 	src/test_bridge_runtime_policy.c
 	src/test_link_window.c
 	src/test_membership.c
-	src/test_sync_tracker.c
-	src/test_radio_address.c
-	src/test_wireless_time_sync.c
 	src/test_master_scheduler.c
 	src/test_slave_scheduler.c
-	src/test_param_config.c
-	src/test_nmea_parser.c
-	src/test_utc_clock.c
-	../../src/bridge_config.c
-	../../src/link_protocol.c
-	../../src/byte_ring.c
-	../../src/record_queue.c
-	../../src/bridge_validation.c
-	../../src/link_window.c
-	../../src/membership.c
-	../../src/sync_tracker.c
-	../../src/radio_address.c
-	../../src/wireless_time_sync.c
-	../../src/link_scheduler_core.c
-	../../src/param_config.c
-	../../src/nmea_parser.c
-	../../src/utc_clock.c
+	../../../src/bridge/link_protocol.c
+	../../../src/bridge/byte_ring.c
+	../../../src/bridge/record_queue.c
+	../../../src/validation/bridge_validation.c
+	../../../src/bridge/link_window.c
+	../../../src/bridge/membership.c
+	../../../src/bridge/link_scheduler_core.c
 )

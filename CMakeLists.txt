@@ -15,41 +15,49 @@ if(DEFINED CONFIG_RADIO_BRIDGE_GROUP_KEY)
 	endif()
 endif()
 
-target_include_directories(app PRIVATE src)
+target_include_directories(app PRIVATE
+	src/app
+	src/config
+	src/bridge
+	src/radio
+	src/time
+	src/validation
+)
 
 target_sources(app PRIVATE
-	src/bridge_config.c
-	src/byte_ring.c
-	src/record_queue.c
-	src/link_protocol.c
-	src/link_window.c
-	src/membership.c
-	src/link_scheduler_core.c
-	src/radio_address.c
-	src/radio_address_crypto.c
-	src/radio_transport.c
-	src/uart_bridge.c
-	src/wireless_time_sync.c
-	src/sync_tracker.c
-	src/sync_filter.c
-	src/time_sync_math.c
-	src/timebase.c
-	src/pps_output.c
-	src/pps_input.c
-	src/time_uart.c
-	src/nmea_parser.c
-	src/utc_clock.c
-	src/param_config.c
-	src/param_shell.c
-	src/bridge_runtime.c
-	src/time_sync_shell.c
-	src/status.c
-	src/heartbeat_led.c
+	src/config/bridge_config.c
+	src/config/param_config.c
+	src/config/param_shell.c
+	src/bridge/byte_ring.c
+	src/bridge/record_queue.c
+	src/bridge/link_protocol.c
+	src/bridge/link_window.c
+	src/bridge/membership.c
+	src/bridge/link_scheduler_core.c
+	src/bridge/uart_bridge.c
+	src/bridge/bridge_runtime.c
+	src/radio/radio_address.c
+	src/radio/radio_address_crypto.c
+	src/radio/radio_transport.c
+	src/time/wireless_time_sync.c
+	src/time/sync_tracker.c
+	src/time/sync_filter.c
+	src/time/time_sync_math.c
+	src/time/timebase.c
+	src/time/pps_output.c
+	src/time/pps_input.c
+	src/time/time_uart.c
+	src/time/nmea_parser.c
+	src/time/utc_clock.c
+	src/time/time_sync_shell.c
+	src/app/status.c
+	src/app/heartbeat_led.c
+	src/app/main.c
 )
 
 target_sources_ifdef(CONFIG_RADIO_BRIDGE_VALIDATION_CDC app PRIVATE
-	src/bridge_validation.c
-	src/bridge_validation_shell.c
+	src/validation/bridge_validation.c
+	src/validation/bridge_validation_shell.c
 )
 
 set(APP_GIT_VERSION "unknown")
@@ -80,5 +88,3 @@ target_compile_definitions(app PRIVATE
 	APP_GIT_VERSION="${APP_GIT_VERSION}"
 	APP_LOG_FORMAT_VERSION=2
 )
-
-target_sources(app PRIVATE src/main.c)
