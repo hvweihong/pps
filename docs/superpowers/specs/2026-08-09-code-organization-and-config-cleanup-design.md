@@ -85,6 +85,7 @@ ring size、聚合超时、无线调度周期/slot/window/lease、最大 slave �
 ```text
 tests/
 ├── unit/bridge/       # protocol、ring、record、membership、scheduler policy
+├── unit/radio/        # address derivation and radio-facing pure logic
 ├── unit/time/         # sync filter、UTC、NMEA、time math
 ├── unit/time_uart/    # async RX/restart/error handling
 └── host/              # board_e2e/flash tool contracts and recovery evidence
