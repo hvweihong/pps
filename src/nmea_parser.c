@@ -99,6 +99,9 @@ static int field(const char *body, size_t body_len, unsigned index,
 
 int rb_nmea_parse_sentence(const char *line, size_t len, struct rb_nmea_utc *utc)
 {
+	struct rb_nmea_utc parsed = {0};
+	int ret;
+
 	if (!line || !utc || len == 0) return -EINVAL;
 	if (len > RB_NMEA_MAX_SENTENCE_LENGTH) return -EMSGSIZE;
 	if (line[0] != '$') return -EINVAL;
@@ -121,9 +124,9 @@ int rb_nmea_parse_sentence(const char *line, size_t len, struct rb_nmea_utc *utc
 	if (!rmc && !zda) return -ENOTSUP;
 	const char *s;
 	size_t n;
-	int ret = field(body, body_len, 1, &s, &n);
+	ret = field(body, body_len, 1, &s, &n);
 	if (ret != 0) return ret;
-	ret = parse_time(s, n, utc);
+	ret = parse_time(s, n, &parsed);
 	if (ret != 0) return ret;
 	if (rmc) {
 		if (field(body, body_len, 2, &s, &n) != 0 || n != 1) return -EINVAL;
@@ -131,18 +134,35 @@ int rb_nmea_parse_sentence(const char *line, size_t len, struct rb_nmea_utc *utc
 		if (*s != 'A') return -EAGAIN;
 		ret = field(body, body_len, 9, &s, &n);
 		if (ret != 0) return ret;
-		ret = parse_date(s, n, utc);
+		ret = parse_date(s, n, &parsed);
 		if (ret != 0) return ret;
 	} else {
 		unsigned day, month, year;
-		if (field(body, body_len, 2, &s, &n) != 0 || decimal(s, n, &day) != 0 || day > 31) return -ERANGE;
-		utc->day = (uint8_t)day;
-		if (field(body, body_len, 3, &s, &n) != 0 || decimal(s, n, &month) != 0 || month > 12) return -ERANGE;
-		utc->month = (uint8_t)month;
-		if (field(body, body_len, 4, &s, &n) != 0 || decimal(s, n, &year) != 0 || year > UINT16_MAX) return -ERANGE;
-		utc->year = (uint16_t)year;
+		ret = field(body, body_len, 2, &s, &n);
+		if (ret != 0) return ret;
+		if (n != 2) return -EINVAL;
+		ret = decimal(s, n, &day);
+		if (ret != 0) return ret;
+		if (day > 31) return -ERANGE;
+		parsed.day = (uint8_t)day;
+		ret = field(body, body_len, 3, &s, &n);
+		if (ret != 0) return ret;
+		if (n != 2) return -EINVAL;
+		ret = decimal(s, n, &month);
+		if (ret != 0) return ret;
+		if (month > 12) return -ERANGE;
+		parsed.month = (uint8_t)month;
+		ret = field(body, body_len, 4, &s, &n);
+		if (ret != 0) return ret;
+		if (n != 4) return -EINVAL;
+		ret = decimal(s, n, &year);
+		if (ret != 0) return ret;
+		parsed.year = (uint16_t)year;
 	}
-	return validate_calendar(utc);
+	ret = validate_calendar(&parsed);
+	if (ret != 0) return ret;
+	*utc = parsed;
+	return 0;
 }
 
 int rb_nmea_utc_to_unix(const struct rb_nmea_utc *u, int64_t *seconds)

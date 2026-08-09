@@ -61,6 +61,26 @@ ZTEST(nmea_parser, test_boundaries_fraction_leap_and_conversion)
 	zassert_equal(rb_nmea_parse_sentence(bad_fraction, strlen(bad_fraction), &utc), -EINVAL);
 }
 
+ZTEST(nmea_parser, test_zda_requires_fixed_width_date_fields)
+{
+	struct rb_nmea_utc utc;
+	const char *short_day = "$GPZDA,201530.00,4,07,2002,00,00*50\r\n";
+	const char *short_month = "$GPZDA,201530.00,04,7,2002,00,00*50\r\n";
+	const char *long_year = "$GPZDA,201530.00,04,07,02002,00,00*50\r\n";
+	zassert_equal(rb_nmea_parse_sentence(short_day, strlen(short_day), &utc), -EINVAL);
+	zassert_equal(rb_nmea_parse_sentence(short_month, strlen(short_month), &utc), -EINVAL);
+	zassert_equal(rb_nmea_parse_sentence(long_year, strlen(long_year), &utc), -EINVAL);
+}
+
+ZTEST(nmea_parser, test_failure_does_not_mutate_utc_output)
+{
+	struct rb_nmea_utc utc = {1999, 9, 9, 9, 9, 9, 999};
+	const struct rb_nmea_utc expected = {1999, 9, 9, 9, 9, 9, 999};
+	const char *bad_date = "$GPZDA,120000,29,02,2023,00,00*41\r\n";
+	zassert_equal(rb_nmea_parse_sentence(bad_date, strlen(bad_date), &utc), -ERANGE);
+	zassert_mem_equal(&utc, &expected, sizeof(utc));
+}
+
 ZTEST(nmea_parser, test_missing_dollar_star_unsupported_and_overlong_rejected)
 {
 	struct rb_nmea_utc utc;

@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <limits.h>
 
 #include <zephyr/ztest.h>
 
@@ -93,15 +94,48 @@ ZTEST(utc_clock, test_three_pairs_enter_locked)
 	zassert_equal(publication.next_pps_utc_seconds, 103);
 }
 
-ZTEST(utc_clock, test_utc_seconds_must_be_consecutive_to_lock)
+ZTEST(utc_clock, test_utc_second_gap_restarts_acquisition)
 {
 	struct rb_utc_clock clock;
 	setup_clock(&clock);
 	add_pair(&clock, 1000000, 100);
 	rb_utc_clock_tick(&clock, 2000000);
-	zassert_equal(rb_utc_clock_note_pair(&clock, 2000000, 102), -ERANGE);
+	zassert_ok(rb_utc_clock_note_pair(&clock, 2000000, 102));
 	zassert_equal(rb_utc_clock_state(&clock), RB_UTC_ACQUIRING);
-	zassert_equal(reset_count, 1);
+	zassert_equal(clock.valid_pairs, 1);
+	zassert_equal(reset_count, 2);
+}
+
+ZTEST(utc_clock, test_discontinuous_pair_restarts_acquisition)
+{
+	struct rb_utc_clock clock;
+	setup_clock(&clock);
+	add_pair(&clock, 1000000, 100);
+	add_pair(&clock, 3000000, 102);
+	zassert_equal(rb_utc_clock_state(&clock), RB_UTC_ACQUIRING);
+	zassert_equal(reset_count, 2);
+	add_pair(&clock, 4000000, 103);
+	zassert_equal(rb_utc_clock_state(&clock), RB_UTC_ACQUIRING);
+	add_pair(&clock, 5000000, 104);
+	zassert_equal(rb_utc_clock_state(&clock), RB_UTC_LOCKED);
+}
+
+ZTEST(utc_clock, test_failed_discontinuous_reset_preserves_old_baseline)
+{
+	struct rb_utc_clock clock;
+	setup_clock(&clock);
+	add_pair(&clock, 1000000, 100);
+	reset_result = -EIO;
+	rb_utc_clock_tick(&clock, 3000000);
+	zassert_equal(rb_utc_clock_note_pair(&clock, 3000000, 102), -EIO);
+	zassert_equal(clock.last_pair_tick, 1000000);
+	zassert_equal(clock.last_pair_second, 100);
+	zassert_equal(clock.valid_pairs, 1);
+	reset_result = 0;
+	add_pair(&clock, 4000000, 103);
+	add_pair(&clock, 5000000, 104);
+	add_pair(&clock, 6000000, 105);
+	zassert_equal(rb_utc_clock_state(&clock), RB_UTC_LOCKED);
 }
 
 ZTEST(utc_clock, test_phase_reset_failure_does_not_accept_pair)
@@ -173,6 +207,29 @@ ZTEST(utc_clock, test_pair_after_900ms_is_rejected)
 	zassert_equal(rb_utc_clock_note_pair(&clock, 100000, 100), -ERANGE);
 	rb_utc_clock_tick(&clock, 1000000);
 	zassert_equal(rb_utc_clock_note_pair(&clock, 1000000, 100), 0);
+}
+
+ZTEST(utc_clock, test_overflowing_pair_is_rejected_without_state_change)
+{
+	struct rb_utc_clock clock;
+	setup_clock(&clock);
+	rb_utc_clock_tick(&clock, UINT64_MAX);
+	zassert_equal(rb_utc_clock_note_pair(&clock, UINT64_MAX - 1, 100), -ERANGE);
+	zassert_false(clock.have_pair);
+	rb_utc_clock_tick(&clock, 1000000);
+	zassert_equal(rb_utc_clock_note_pair(&clock, 1000000, INT64_MAX), -ERANGE);
+	zassert_false(clock.have_pair);
+}
+
+ZTEST(utc_clock, test_backward_ticks_do_not_regress_clock_or_publication)
+{
+	struct rb_utc_clock clock;
+	struct rb_utc_publication publication;
+	setup_clock(&clock);
+	rb_utc_clock_tick(&clock, 2000000);
+	rb_utc_clock_tick(&clock, 1000000);
+	zassert_equal(clock.now_tick, 2000000);
+	zassert_equal(rb_utc_clock_publication(&clock, 1999999, &publication), -ERANGE);
 }
 
 ZTEST_SUITE(utc_clock, NULL, NULL, NULL, NULL, NULL);

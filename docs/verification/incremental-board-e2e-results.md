@@ -339,3 +339,52 @@ gate 历史样本。窗口结果：
 双向 traffic 没有回归。没有接入外部 GNSS NMEA 或 PPS 信号，也没有连接示波器/逻辑分析仪；因此
 external PPS capture、NMEA association 与 `<=20 us` phase accuracy 均**未验证且未声明**，留给
 Stage 3 硬件接入和测量。
+
+### Stage 2 review follow-up — atomic recovery and bounds hardening
+
+在 `af4f0697cc3a61b2df12e546add816293d7323d1` 的 code-quality review 后，补充了以下 RED
+tests：`test_discontinuous_pair_restarts_acquisition`、
+`test_failed_discontinuous_reset_preserves_old_baseline`、
+`test_zda_requires_fixed_width_date_fields`、`test_failure_does_not_mutate_utc_output`、
+`test_overflowing_pair_is_rejected_without_state_change` 与
+`test_backward_ticks_do_not_regress_clock_or_publication`。初始 run 全部按预期失败；实现后 bridge
+native suite 为 **116/116 PASS**（`nmea_parser` 8/8，`utc_clock` 15/15）。
+
+- ACQUIRING/LOCKED 中 timely but discontinuous pair 现在原子地成为新的 phase-reset acquisition
+  baseline；随后三个连续 pairs 才 lock。phase-reset callback 失败保持旧 baseline，不能半更新。
+- ZDA 强制 `dd,mm,yyyy` 宽度；parser 仅在完整有效 parse 后写入 caller UTC output。
+- UTC clock 忽略 backwards `tick()`，拒绝 backwards publication projection，并对 PPS target/tick
+  progression/signed UTC second additions做 overflow guards。
+- 复跑 sync native：15/15 PASS；Python：38/38 PASS；active static：13 PASS、retired skips：15；
+  `ruff` 与 `git diff --check` PASS。
+
+最终 fresh validation command：
+
+```sh
+./build.sh master -d build/stage2-validation-review -- -DOVERLAY_CONFIG=validation.conf
+```
+
+- FLASH `169440 B`，RAM `188340 B`，UF2 `338944 B`；SHA-256 仍为
+  `f50a5fa4ade1e7fc3de225b862386bbd5e2c6d4df993bef88d76091546cae395`。
+- build identity：`APP_GIT_VERSION="af4f0697cc3a-dirty"`。
+
+最终 fixed-ID command 使用 `build/stage2-validation-review/zephyr/zephyr.uf2`：
+
+```sh
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage nmea-utc-pure-review \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage2-validation-review/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage2-validation-review/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 --command-timeout 10
+```
+
+- gate PASS：roles 0/1，master `active_count=1`，slave `sync_state=2/LOCKED`，两个 600-byte
+  directions exact verify，bridge/UART/queue drops 全为 0，flash/recovery/retry 全为 0。
+- 独立 fresh CDC 31-second window：master `39043 -> 73568 ms` (delta `34525 ms`)；slave
+  `35484 -> 70563 ms` (delta `35079 ms`)；start/end 都重新检查 ready state 和 zero drops。
+- 最终 raw logs：
+  `build/board-e2e/20260809T054517.485999Z-nmea-utc-pure-review/master.raw.log`、
+  `build/board-e2e/20260809T054517.485999Z-nmea-utc-pure-review/slave.raw.log`、
+  `build/board-e2e/20260809T054517.485999Z-nmea-utc-pure-review/master.steady-30s.raw.log`、
+  `build/board-e2e/20260809T054517.485999Z-nmea-utc-pure-review/slave.steady-30s.raw.log`。
