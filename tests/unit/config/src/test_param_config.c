@@ -200,7 +200,7 @@ ZTEST(param_config, test_get_default_values)
 	/* UART baudrate should match default */
 	ret = rb_param_get_uint32(RB_PARAM_UART_BAUDRATE, &value);
 	zassert_equal(ret, 0, "Get should succeed");
-	zassert_equal(value, 115200, "Should return compiled UART default");
+	zassert_equal(value, 921600, "Should return compiled UART default");
 
 	zassert_ok(rb_param_get_uint32(RB_PARAM_TIME_SOURCE_MODE, &value));
 	zassert_equal(value, 0, "Local time source is the reboot default");
@@ -286,7 +286,7 @@ ZTEST(param_config, test_clear)
 	/* Should return default */
 	ret = rb_param_get_uint32(RB_PARAM_UART_BAUDRATE, &value);
 	zassert_equal(ret, 0, "Get should succeed");
-	zassert_equal(value, 115200, "Should return default after clear");
+	zassert_equal(value, 921600, "Should return default after clear");
 }
 
 ZTEST(param_config, test_reset_all)

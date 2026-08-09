@@ -13,7 +13,7 @@ config RADIO_BRIDGE_GROUP_KEY
 
 config RADIO_BRIDGE_UART_BAUDRATE
 	int "Data UART baud rate"
-	default 115200
+	default 921600
 	range 1200 3000000
 
 config TIME_UART_BAUDRATE

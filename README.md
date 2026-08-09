@@ -1,26 +1,140 @@
 # XIAO nRF52840 Plus 无线 PPS 与 UART Bridge
 
-这是一个运行在 Seeed XIAO nRF52840 Plus 上的 Zephyr/NCS 固件。同一份固件可通过
-NVS 配置为 master 或 slave，并在一个 ESB 星型网络内同时提供：
+## 快速开始
 
-- 1 Hz PPS 时间同步；
-- master 本地授时或外部 NMEA/PPS 驯服；
-- master 到多个 slave 的 best-effort 广播下行；
-- 每个 slave 到 master 的独立、可靠轮询上行；
-- 物理 UART 数据桥，以及 validation 固件中的 CDC 端到端注入/校验；
-- NVS 参数、分组隔离、watchdog 和冷启动保护。
+### 环境与构建
 
-当前板级验证使用：
+工程面向 Seeed XIAO nRF52840 Plus，默认使用 nRF Connect SDK v3.3.1、
+Zephyr SDK 0.17.4 和板目标 `xiao_ble/nrf52840`。构建脚本默认在
+`/home/hv/ncs` 查找 NCS 与 Python 虚拟环境；其他安装位置可通过
+`NCS_WORKSPACE`、`ZEPHYR_BASE`、`ZEPHYR_VENV` 和
+`ZEPHYR_SDK_INSTALL_DIR` 覆盖。
 
-- master：USB ID `DBE5C3D84EA2EC6F`，`role_id=0`；
-- slave：USB ID `5B3D71D27A709CA2`，`role_id=1`；
-- `group_id=1`；
-- `group_key=00112233445566778899aabbccddeeff`；
-- 数据 UART：115200 baud。
+同一份镜像通过 NVS 配置为 master 或 slave。`master` 参数只命名默认构建目录，
+不会把角色固化进镜像。
 
-完整阶段证据见 `docs/verification/incremental-board-e2e-results.md`。
+```bash
+./build.sh master -d build/production
+./build.sh master -d build/validation -- -DOVERLAY_CONFIG=validation.conf
+```
 
-## 系统拓扑
+- `build/production/zephyr/zephyr.uf2`：生产固件，物理 UART bridge、无线时间同步、
+  PPS、参数 shell 和运行日志。
+- `build/validation/zephyr/zephyr.uf2`：在生产功能之上增加 CDC payload/time
+  注入与校验命令，用于没有外部串口或 GNSS 时的双板自动化测试。
+- `loss-validation.conf` 仅用于丢包恢复测试，禁止用于生产部署。
+
+### 接线
+
+所有电平为 3.3 V，外部设备必须与板子共地。UART 使用 8N1、无硬件流控，TX/RX
+需要交叉连接。
+
+| 用途 | 板端 TX | 板端 RX/输入 | 默认配置 | 说明 |
+| --- | --- | --- | --- | --- |
+| 数据 UART bridge (`uart0`) | P1.11 | P1.12 | 921600 baud | master/slave 业务数据 |
+| 外部时间 UART (`uart1`) | P0.04 | P0.05 | 9600 baud | external master 接收 NMEA RMC/ZDA |
+| PPS 输出 | P0.03 | - | 1 Hz，100 ms 高电平 | 所有角色输出 |
+| PPS 输入 | - | P0.02 | 上升沿捕获 | 仅 external master 使用 |
+| USB CDC | USB | USB | 115200 line coding | shell、日志；validation 测试通道 |
+
+```text
+board TX  -> adapter RX
+board RX  <- adapter TX
+board GND -- adapter GND
+```
+
+### 烧录与运行时配置
+
+双击 reset 可进入 UF2 bootloader。自动化烧录必须使用完整 16 位十六进制 USB ID，避免多板
+环境中刷错设备。
+
+```bash
+/home/hv/ncs/.venv/bin/python tools/flash_uf2.py --list
+
+/home/hv/ncs/.venv/bin/python tools/flash_uf2.py \
+  --device-id DBE5C3D84EA2EC6F \
+  --uf2 build/validation/zephyr/zephyr.uf2
+```
+
+CDC shell 中只有以下 8 个持久化参数；全部在 cold reboot 后生效。
+
+| 参数 | 编译默认值 | 有效范围/格式 | 用途 |
+| --- | ---: | --- | --- |
+| `role_id` | 0 | 0=master，1..3=slave | 同一镜像选择角色 |
+| `group_id` | 1 | 1..0xFFFFFFFE | 网络分组 |
+| `group_key` | `00112233445566778899aabbccddeeff` | 32 个十六进制字符 | 派生 RF 地址 |
+| `uart_baudrate` | 921600 | 1200..3000000 | 数据 UART |
+| `time_source_mode` | 0 | 0=local，1=external | master 时间源 |
+| `time_uart_baudrate` | 9600 | 1200..115200 | NMEA UART |
+| `pps_input_delay_us` | 0 | 0..1000 | 外部 PPS 输入延迟补偿 |
+| `radio_delay_us` | 0 | 0..1000 | slave 无线延迟校准 |
+
+有效 NVS 值优先；参数未持久化、key 被清除、存储 backend 不可用或加载失败时，使用
+Kconfig/C 代码中的编译默认值。当前 NVS ID 布局不兼容旧实验固件；升级旧板前先在旧
+固件上执行 `param reset`，再烧录和重新配置。
+
+```text
+# 查看
+param list
+param get role_id
+
+# master：本地时间对外授时
+param set role_id 0
+param set group_id 1
+param set group_key 00112233445566778899aabbccddeeff
+param set time_source_mode 0
+kernel reboot cold
+
+# master：外部 NMEA + PPS 驯服
+param set role_id 0
+param set time_source_mode 1
+param set time_uart_baudrate 9600
+param set pps_input_delay_us 0
+kernel reboot cold
+
+# slave；group_id/group_key 必须与 master 一致
+param set role_id 1
+param set group_id 1
+param set group_key 00112233445566778899aabbccddeeff
+kernel reboot cold
+```
+
+修改单个参数可用 `param clear <name>` 恢复编译默认值；`param reset` 清除全部 8 项。
+
+### 双板端到端验证
+
+以下命令会按固定 USB ID 刷写两块板，自动配置角色，并验证无线锁定、CDC 模拟 UART
+bridge 双向数据、队列/驱动错误计数与证据落盘。
+
+```bash
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage local-check \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600
+```
+
+每次运行在 `build/board-e2e/<timestamp>-<stage>/` 保存两板原始日志和
+`summary.json`。普通 shell command timeout 最多只自动重刷受影响的精确 USB ID 一次；
+再次超时立即失败，不会无限恢复。
+
+开发回归包括 5 个 native suite 和 host runner 测试：
+
+```bash
+for suite in bridge config radio time time_uart; do
+  ZEPHYR_BASE=/home/hv/ncs/zephyr /home/hv/ncs/.venv/bin/west build \
+    -p always -b native_sim/native "tests/unit/${suite}" -d "build/tests/${suite}"
+  "./build/tests/${suite}/${suite}/zephyr/zephyr.exe"
+done
+
+/home/hv/ncs/.venv/bin/python -m unittest discover -v -s tests/host -t .
+/home/hv/ncs/.venv/bin/python -m ruff check tests tools
+```
+
+## 工程介绍
+
+### 功能与数据拓扑
 
 ```text
                          best-effort broadcast
@@ -32,235 +146,66 @@ host UART <-> master board                 slave board <-> host UART
                            per-slave records
 ```
 
-- master 下行不保留 repair history，也不等待业务 ACK；丢包后 slave 直接接受后续序号。
-- slave 上行通过 master 轮询和 ACK 确认；未确认的数据会重发。
-- master 为每个 node 保留独立 record queue，并按轮询顺序整条输出到 UART，避免不同
-  slave 的记录被拼接成一个不可区分的字节流。
-- slave 之间没有直接业务数据路径。
-- 当前最大活动 slave 数为 3。
+- master 下行向同组 slave 广播，不保存 repair history，也不等待业务 ACK；丢失一帧不阻塞
+  后续数据。
+- slave 上行由 master 轮询并确认；未确认记录会重发。master 为每个 slave 保留独立完整
+  record queue，再按轮询顺序输出到 UART，避免不同 slave 的字节流被合并。
+- slave 之间没有直接业务收发路径。协议支持最多 3 个活动 slave；当前板级回归使用一块
+  master 和一块 slave，多 slave 调度由 native 测试覆盖。
+- 生产路径使用物理 UART。validation 固件把相同 bridge 边界扩展到 CDC，以便电脑未连接
+  外部串口时仍能验证完整无线链路。
 
-## PPS 与时间源
+### 无线时间同步与 PPS
 
-所有板使用 1 MHz TIMER3 作为统一 64-bit 微秒 timebase。PPS 输出由 TIMER3 compare、
-GPIOTE 和 GPPI/PPI 直接产生，不依赖线程 sleep 或软件 GPIO 翻转。
+所有板使用 1 MHz TIMER3 作为统一 64-bit 微秒 timebase。PPS 输出由 TIMER compare、
+GPIOTE 与 GPPI/PPI 在硬件侧产生：P0.03 固定输出 1 Hz、默认 100 ms 高电平脉冲，
+上升沿代表本地的整秒边界。
 
-| 项目 | 当前行为 |
+master 有两种 NVS 可选模式：
+
+- `time_source_mode=0`：使用本地 timebase 持续对外授时；没有外部 UTC，因此 UTC quality
+  标记为无效，但 PPS 与无线相位基准继续工作。
+- `time_source_mode=1`：组合 P0.02 外部 PPS 上升沿与 UART1 NMEA RMC/ZDA。连续有效配对后
+  进入 `EXTERNAL_LOCKED`；输入缺失时进入 `HOLDOVER`，以最后基准和本地 timebase 继续
+  输出。
+
+slave 从连续无线同步帧估计 master/slave offset，校正本地 PPS epoch，并通过
+`time_sync status` 报告 `ACQUIRING/LOCKED` 状态。双板自动化已经验证无线 `LOCKED`、
+1 Hz scheduler 持续运行以及冷重启后的重新锁定。
+
+### 参数、分组与安全边界
+
+参数层只持久化现场部署需要调整的 8 项。ring 容量、广播/轮询时序、PPS 脉宽、日志与 LED
+等资源或诊断策略属于 Kconfig 编译期配置，避免同一设置同时存在多套运行时来源。
+
+`group_id` 决定 RF channel，并与 `group_key` 共同派生 RF address；不同普通设备组已在双板测试中验证
+不会互相发现或锁定。它们用于避免普通设备误串组，不提供消息认证、保密或对抗恶意设备
+的安全边界；需要安全通信时必须另加认证、加密和密钥生命周期管理。
+
+### 代码结构
+
+| 路径 | 职责 |
 | --- | --- |
-| PPS 输出 | P0.03，1 Hz，高电平有效 |
-| PPS 默认脉宽 | 100000 us（100 ms） |
-| timebase 分辨率 | 1 us |
-| master 本地模式 | `time_source_mode=0`，以本地 timebase 对外同步，UTC 标记无效 |
-| master 外部模式 | `time_source_mode=1`，组合 P0.02 PPS 与 UART1 NMEA RMC/ZDA |
-| slave 时间源 | 无线同步 publication |
+| `src/app/` | 启动、watchdog/boot guard、状态日志、LED |
+| `src/config/` | 编译默认值、8 项 NVS 参数、CDC shell |
+| `src/bridge/` | wire protocol、ring/record、membership、scheduler、UART bridge 集成 |
+| `src/radio/` | RF 地址派生、AES 辅助与 ESB transport |
+| `src/time/` | timebase、PPS、无线同步、NMEA、UTC 状态机 |
+| `src/validation/` | validation-only CDC bridge/time 注入与校验 |
+| `tests/unit/` | bridge/config/radio/time/time-UART 设计型 native 测试 |
+| `tests/host/` | 固定 ID 烧录、自动恢复、证据与 runner 测试 |
+| `tools/` | UF2 烧录与双板 E2E 工具 |
 
-外部模式在连续 3 组有效 PPS/NMEA 配对后进入 `EXTERNAL_LOCKED`。任一输入连续约 3 秒
-缺失后进入 `HOLDOVER`，继续基于最后的 UTC 基准和本地 timebase 运行。外部模式冷启动、
-尚未取得有效配对时为 `EXTERNAL_ACQUIRING/UTC_INVALID`。
+### 验证边界
 
-slave 通过连续无线同步帧估计 master/slave TIMER3 的 offset，并把本地 PPS 上升沿调度到
-master PPS epoch。无线状态可通过 `time_sync status` 和周期状态日志查看。
+production 固件不编译 CDC payload/time 注入或丢包注入；validation overlay 只增加可控测试
+入口，仍运行相同的物理 UART、scheduler、radio 和时间同步核心。完整阶段证据记录在
+`docs/verification/incremental-board-e2e-results.md`。
 
-当前双板验证已证明 PPS scheduler 持续以 1 Hz/100 ms 配置运行，以及 slave 可恢复到
-`LOCKED`。真实外部 GNSS/PPS 捕获、PPS 电气脉宽和锁定后 `<=20 us` 相位误差仍必须使用
-GNSS/PPS 源与示波器完成最终验收，不能由 CDC synthetic pair 替代。
+当前双板验证已覆盖同一镜像角色配置、NVS 默认/持久化优先级、group 隔离、无线锁定、
+双向 CDC 与物理 UART 数据、冷重启和自动恢复。以下项目仍需真实外部仪器完成最终验收：
 
-## UART 接线
-
-| 用途 | 板端 TX | 板端 RX | 默认波特率 | 说明 |
-| --- | --- | --- | --- | --- |
-| 数据 UART bridge (`uart0`) | P1.11 | P1.12 | 115200 | master/slave 双向原始数据 |
-| 外部时间 UART (`uart1`) | P0.04 | P0.05 | 9600 | external master 的 NMEA 输入 |
-| PPS 输出 | P0.03 | - | 1 Hz | 高电平有效，默认 100 ms |
-| PPS 输入 | - | P0.02 | 1 Hz | 仅 external master 初始化 |
-| USB CDC | USB | USB | 115200 line coding | shell、日志、validation bridge |
-
-外部 UART 必须共地，并交叉连接：
-
-```text
-board TX -> adapter RX
-board RX <- adapter TX
-board GND -- adapter GND
-```
-
-数据 UART 使用 8N1、无硬件流控。`uart_baudrate` 和 `time_uart_baudrate` 在启动时应用，
-修改后需要 cold reboot。
-
-本轮物理 UART fixture 已完成双向端到端验证：`/dev/ttyACM2 -> master -> wireless ->
-slave -> /dev/ttyS1` 与反方向均精确传输 600/600 bytes，SHA-256 一致，板端 UART
-record/TX 全部完成且无 drop/start-error。旧 Android adb daemon 仅支持 PTY，因此测试工具在
-adb 边界使用 base64 编解码，避免 PTY 改写原始二进制字节。
-
-## 参数与持久化
-
-参数优先级固定为：
-
-1. NVS 中存在有效持久化值时使用持久化值；
-2. NVS 未配置、对应 key 被清除、backend 不可用或 load 失败时使用编译默认值。
-
-关键参数：
-
-| 参数 | 默认值 | 范围/含义 | 生效方式 |
-| --- | ---: | --- | --- |
-| `role_id` | 0 | 0=master，1..3=slave | reboot |
-| `group_id` | 1 | 1..0xFFFFFFFE | reboot |
-| `group_key` | `001122...eeff` | 16-byte hex | reboot |
-| `uart_baudrate` | 115200 | 1200..3000000 | reboot |
-| `time_source_mode` | 0 | 0=local，1=external | reboot |
-| `time_uart_baudrate` | 9600 | 1200..115200 | reboot |
-| `pps_input_delay_us` | 0 | 0..1000 | reboot |
-| `pps_period_us` | 1000000 | 固定 1 Hz | reboot |
-| `pps_width_us` | 100000 | 10..500000 | reboot |
-| `radio_delay_us` | 0 | 0..1000 | reboot |
-| `status_interval_ms` | 1000 | 100..10000 | runtime |
-| `led_heartbeat` | true | bool | runtime |
-| `led_period_ms` | 1000 | 100..10000 | runtime |
-
-CDC shell 示例：
-
-```text
-param list
-param get role_id
-param set role_id 1
-param set group_id 1
-param set group_key 00112233445566778899aabbccddeeff
-param set time_source_mode 0
-param clear time_source_mode
-param reset
-kernel reboot cold
-```
-
-当前 NVS ID 布局不兼容旧实验固件。项目不做旧 ID 迁移；升级旧板时直接执行相关
-`param clear <name>` 或 `param reset`，然后按当前参数重新配置。
-
-`group_id` 与 `group_key` 用于派生普通设备不易串组的 RF channel/address。它们不是消息认证
-或加密协议；如果需要对抗恶意设备，必须另加认证与密钥管理。
-
-## 构建
-
-默认环境：
-
-```text
-NCS_WORKSPACE=/home/hv/ncs
-ZEPHYR_BASE=/home/hv/ncs/zephyr
-ZEPHYR_VENV=/home/hv/ncs/.venv
-ZEPHYR_SDK_INSTALL_DIR=/home/hv/zephyr-sdk-0.17.4
-BOARD=xiao_ble/nrf52840
-```
-
-`master`/`slave` 参数只决定默认输出目录；角色由同一镜像中的 NVS `role_id` 决定：
-
-```bash
-./build.sh master
-./build.sh slave
-```
-
-validation 固件启用 CDC bridge 测试命令：
-
-```bash
-./build.sh master -d build/validation -- \
-  -DOVERLAY_CONFIG=validation.conf
-```
-
-测试专用丢包镜像：
-
-```bash
-./build.sh master -d build/loss-validation -- \
-  -DOVERLAY_CONFIG='validation.conf;loss-validation.conf'
-```
-
-`loss-validation.conf` 绝不能用于生产固件。
-
-## 烧录与角色配置
-
-可以手动双击 reset 进入 UF2 bootloader，也可以使用固定 USB ID 工具：
-
-```bash
-/home/hv/ncs/.venv/bin/python tools/flash_uf2.py --list
-
-/home/hv/ncs/.venv/bin/python tools/flash_uf2.py \
-  --device-id DBE5C3D84EA2EC6F \
-  --uf2 build/validation/zephyr/zephyr.uf2
-```
-
-烧录同一 UF2 后，分别通过 CDC shell 设置：
-
-```text
-# master
-param set role_id 0
-kernel reboot cold
-
-# slave
-param set role_id 1
-kernel reboot cold
-```
-
-固件带 30 秒 watchdog 和持久化 boot guard。自动化工具在再次 cold flash 前先等待稳定启动
-时间，并在普通 shell command timeout 时只重刷受影响的精确 USB ID 一次；第二次 timeout
-直接失败并保存 raw logs 与 JSON summary，不会无限恢复。
-
-## 双板端到端验证
-
-```bash
-/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
-  --stage local-check \
-  --master-id DBE5C3D84EA2EC6F \
-  --slave-id 5B3D71D27A709CA2 \
-  --master-uf2 build/validation/zephyr/zephyr.uf2 \
-  --slave-uf2 build/validation/zephyr/zephyr.uf2 \
-  --cycles 1 --bridge-length 600
-```
-
-runner 只接受完整 16-hex USB ID，不回退到 `/dev/ttyACM0`/`1`。每次运行在
-`build/board-e2e/<timestamp>-<stage>/` 保存：
-
-- `master.raw.log`；
-- `slave.raw.log`；
-- `summary.json`，包含固件 SHA-256、USB ID、双向结果、flash/retry/recovery 次数、
-  queue drops、错误与起止时间。
-
-validation CDC 命令包括 `bridge_test inject`、`verify`、`stats`、丢包注入和时间源状态测试；
-生产固件不编译这些 payload 注入命令。
-
-## 主机测试
-
-```bash
-ZEPHYR_BASE=/home/hv/ncs/zephyr \
-/home/hv/ncs/.venv/bin/west build -p always -b native_sim/native \
-  tests/bridge_logic -d build/tests/bridge_logic
-./build/tests/bridge_logic/bridge_logic/zephyr/zephyr.exe
-
-ZEPHYR_BASE=/home/hv/ncs/zephyr \
-/home/hv/ncs/.venv/bin/west build -p always -b native_sim/native \
-  tests/sync_logic -d build/tests/sync_logic
-./build/tests/sync_logic/sync_logic/zephyr/zephyr.exe
-
-/home/hv/ncs/.venv/bin/python -m unittest -v \
-  tests/test_board_e2e.py tests/test_flash_uf2.py
-
-for check in tests/*_static_check.sh; do bash "$check"; done
-```
-
-## 主要模块
-
-| 文件 | 职责 |
-| --- | --- |
-| `src/timebase.c` | 1 MHz TIMER3 和硬件捕获/compare 通道 |
-| `src/pps_output.c` / `src/pps_input.c` | PPS 输出和外部 PPS 捕获 |
-| `src/nmea_parser.c` / `src/time_uart.c` | NMEA RMC/ZDA 与外部时间 UART |
-| `src/utc_clock.c` | LOCAL/ACQUIRING/LOCKED/HOLDOVER 状态机 |
-| `src/link_protocol.c` | ESB wire protocol 与 UTC publication |
-| `src/link_scheduler_core.c` | 广播下行、轮询上行、membership 和 record 调度 |
-| `src/record_queue.c` | 每 slave 完整记录队列 |
-| `src/radio_transport.c` | ESB profile/transaction 与硬件事件 |
-| `src/uart_bridge.c` | 物理 UART async RX 和 record-aware TX |
-| `src/bridge_runtime.c` | 时间、无线、UART 和参数集成 |
-| `src/param_config.c` / `src/param_shell.c` | 默认参数、NVS 与 CDC shell |
-| `tools/board_e2e.py` | 固定 ID 双板自动验证、恢复和证据保存 |
-
-## 未完成的外部验收
-
-- 使用真实 GNSS NMEA + PPS 驯服 external master；
-- 用示波器确认两板 PPS 都为 1 Hz、100 ms 高电平；
-- 在 external locked 状态下测量 master/slave 上升沿相位误差并确认 `<=20 us`；
-- 多于一块物理 slave 的并发压力测试。三 slave 的独立 record/round-robin 当前由 native
-  test 覆盖，尚未由三块真实 slave 同时验证。
+- 用真实 GNSS NMEA + PPS 驯服 external master，并验证丢失输入后的 holdover；
+- 用示波器确认 master/slave PPS 都为 1 Hz、100 ms 高电平；
+- 在 external locked 状态测量两板 PPS 上升沿相位误差并确认不超过 20 us；
+- 使用三块真实 slave 做并发吞吐与独立 record 压力测试。
