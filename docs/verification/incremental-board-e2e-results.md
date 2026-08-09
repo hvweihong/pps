@@ -229,3 +229,113 @@ Stage 1 只验证 USB fixed-ID flash/re-enumeration、CDC shell、板上 runtime
 双向 bridge payload。测试时未连接外部 GNSS/PPS 源或示波器/逻辑分析仪，因此**没有测量外部
 PPS 相位，也没有验证或声明 `<= 20 us` 的外部 PPS 相位误差**。该指标必须在后续带外部 PPS
 参考和测量仪器的阶段单独验证。
+
+## Stage 2 — pure NMEA UTC parser and clock model
+
+执行日期：2026-08-09
+
+### TDD and host verification
+
+RED evidence：先加入 `test_nmea_parser.c`/`test_utc_clock.c` 和 CMake sources 后，执行：
+
+```sh
+ZEPHYR_BASE=/home/hv/ncs/zephyr /home/hv/ncs/.venv/bin/west build -p always \
+  -b native_sim/native tests/bridge_logic -d build/tests/bridge_logic
+```
+
+配置按预期失败，错误为 `Cannot find source file: ../../src/nmea_parser.c`。随后为 clock 补充的
+语义 RED cases 也分别失败：`test_external_cold_boot_is_acquiring_but_utc_invalid`、
+`test_utc_seconds_must_be_consecutive_to_lock`、`test_phase_reset_failure_does_not_accept_pair` 和
+`test_publication_projects_to_its_now_tick`。
+
+RMC approved field vector 中的 `0.0,0.0` payload XOR checksum 是 `5E`，不是标准示例中不同
+speed/course fields 所对应的 `6A`；测试因此使用 checksum-valid `*5E`，并保留严格的 checksum
+mismatch rejection，未放宽 parser 来接受错误的 `*6A`。
+
+GREEN commands：
+
+```sh
+ZEPHYR_BASE=/home/hv/ncs/zephyr /home/hv/ncs/.venv/bin/west build -p always \
+  -b native_sim/native tests/bridge_logic -d build/tests/bridge_logic
+./build/tests/bridge_logic/bridge_logic/zephyr/zephyr.exe
+
+ZEPHYR_BASE=/home/hv/ncs/zephyr /home/hv/ncs/.venv/bin/west build -p always \
+  -b native_sim/native tests/sync_logic -d build/tests/sync_logic
+./build/tests/sync_logic/sync_logic/zephyr/zephyr.exe
+
+/home/hv/ncs/.venv/bin/python -m unittest -v \
+  tests/test_board_e2e.py tests/test_flash_uf2.py
+for script in tests/*_static_check.sh; do bash "$script"; done
+/home/hv/ncs/.venv/bin/python -m ruff check tests tools
+git diff --check
+```
+
+- bridge native suite：110/110 PASS；其中新增 `nmea_parser` 6/6 和 `utc_clock` 11/11。
+- sync native suite：15/15 PASS。
+- Python board-gate/UF2 suite：38/38 PASS。
+- static checks：13 PASS、15 retired BLE/MPSL intentional SKIP、0 FAIL。
+- `ruff` 和 `git diff --check`：PASS。shell-path `ruff` 不在 `PATH`，故使用已安装的
+  `/home/hv/ncs/.venv/bin/python -m ruff`。
+
+Clock publication 的 `now_tick` 是纯投影：不改变 model state，而是以该 tick 推进复制状态后
+返回 next PPS UTC second/quality；该语义由 `test_publication_projects_to_its_now_tick` 覆盖。
+
+### Fresh validation firmware
+
+```sh
+./build.sh master -d build/stage2-validation -- -DOVERLAY_CONFIG=validation.conf
+sha256sum build/stage2-validation/zephyr/zephyr.uf2
+```
+
+- pristine build PASS；`CONFIG_RADIO_BRIDGE_VALIDATION_CDC=y`；FLASH `169440 B`，RAM
+  `188340 B`，UF2 `338944 B`。
+- UF2 SHA-256：`f50a5fa4ade1e7fc3de225b862386bbd5e2c6d4df993bef88d76091546cae395`。
+- 构建时 worktree 含 Stage 2 tracked/untracked changes；编译定义为
+  `APP_GIT_VERSION="bee49765839e-dirty"`。
+
+### Fixed-ID hardware regression gate
+
+权威 gate command：
+
+```sh
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage nmea-utc-pure \
+  --master-id DBE5C3D84EA2EC6F \
+  --slave-id 5B3D71D27A709CA2 \
+  --master-uf2 build/stage2-validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/stage2-validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 --command-timeout 10
+```
+
+- master `DBE5C3D84EA2EC6F` 与 slave `5B3D71D27A709CA2` 均用完整
+  `/dev/serial/by-id` identity flash/reconnect；flash attempt 为 1/2，retry/recovery 都是 0。
+- roles 为 0/1；master `active_count=1`；slave `sync_state=2/LOCKED`。
+- master → slave `len=600 seed=49` 与 slave → master `len=600 seed=114` 均 exact verify PASS。
+- 两板 post-traffic `bridge_test stats` 均 `input_drop=0 output_drop=0`，fresh runtime status
+  均 `uart_rx_drop_bytes=0 uart_tx_drop_bytes=0 queue_drop_bytes=0`。
+- 输出：`BOARD_E2E PASS stage=nmea-utc-pure cycles=1 length=600`。
+
+在同一 fixed-ID CDC sessions 中，gate 后独立执行 `kernel uptime`、`bridge_test stats`，等待
+31 秒，再重复同样命令并等待新的 runtime status；每个采样都重新解析 fresh output，而非复用
+gate 历史样本。窗口结果：
+
+- master：`40038 -> 74588 ms`，delta `34550 ms`；start/end 均
+  `active_count=1`，bridge/UART/runtime drops 均为 0。
+- slave：`36503 -> 71595 ms`，delta `35092 ms`；start/end 均 `sync_state=2/LOCKED`，
+  bridge/UART/runtime drops 均为 0。
+- 单调 uptime 跨越完整 30 s 窗口，未发生 watchdog/reset；firmware 没有单独可读的 watchdog
+  reset counter，因此这是 reset absence 的直接 CDC evidence。
+
+最终 raw logs：
+`build/board-e2e/20260809T052816.055793Z-nmea-utc-pure/master.raw.log`、
+`build/board-e2e/20260809T052816.055793Z-nmea-utc-pure/slave.raw.log`、
+`build/board-e2e/20260809T052816.055793Z-nmea-utc-pure/master.steady-30s.raw.log` 和
+`build/board-e2e/20260809T052816.055793Z-nmea-utc-pure/slave.steady-30s.raw.log`。
+
+### Verification boundary
+
+本阶段的 NMEA parser/UTC clock 是未接入 GPIO/UART/Zephyr 的 pure model；双板 gate 证明将这些
+模块链接进 validation firmware 后，既有固定-ID CDC/ESB bridge、无线 `LOCKED` 状态与 600-byte
+双向 traffic 没有回归。没有接入外部 GNSS NMEA 或 PPS 信号，也没有连接示波器/逻辑分析仪；因此
+external PPS capture、NMEA association 与 `<=20 us` phase accuracy 均**未验证且未声明**，留给
+Stage 3 硬件接入和测量。

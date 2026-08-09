@@ -25,6 +25,8 @@ target_sources(app PRIVATE
 	src/test_master_scheduler.c
 	src/test_slave_scheduler.c
 	src/test_param_config.c
+	src/test_nmea_parser.c
+	src/test_utc_clock.c
 	../../src/bridge_config.c
 	../../src/link_protocol.c
 	../../src/byte_ring.c
@@ -36,4 +38,6 @@ target_sources(app PRIVATE
 	../../src/wireless_time_sync.c
 	../../src/link_scheduler_core.c
 	../../src/param_config.c
+	../../src/nmea_parser.c
+	../../src/utc_clock.c
 )
