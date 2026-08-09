@@ -911,6 +911,36 @@ Evidence：
 `build/board-e2e/20260809T122004.903212688Z-controlled-real-timeout-recovery/summary.json`
 及同目录 `master.raw.log`。
 
+### Physical UART size/rate/concurrency and latency
+
+在上述物理接线和 `115200 8N1` 条件下，使用带 magic、方向、sequence、长度和 CRC32
+的独立逻辑帧，完成 1--4096 B 边界包、10/50/100 pps 固定速率、64 KiB 无间隔突发及
+双向并发测试。每个方向均逐包比较 expected/received SHA-256；12/12 场景通过，
+`recoveries=0`，两板最终 `uart_rx_bytes`/`uart_tx_bytes`/bridge queue/drop/error 全为 0。
+
+延时定义为发送端开始发送该逻辑帧首字节到接收端收到完整帧；远端 adb monotonic 时钟用
+发送前后 NTP 式往返校准，校准不确定度为 `0.786 ms`。下表单位为 ms，吞吐为线上字节/s：
+
+| 场景 | 方向 | 包数 | 吞吐 | min | P50 | P95 | P99 | max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 边界 1--4096 B | master→slave | 30 | 5035 | 7.64 | 47.49 | 227.98 | 406.77 | 406.77 |
+| 边界 1--4096 B | slave→master | 30 | 5016 | 11.42 | 54.38 | 237.62 | 415.79 | 415.79 |
+| 10 pps × 32 B | master→slave | 20 | 491 | 12.68 | 12.82 | 12.94 | 13.26 | 13.26 |
+| 10 pps × 32 B | slave→master | 20 | 489 | 17.23 | 19.81 | 22.65 | 23.04 | 23.04 |
+| 50 pps × 64 B | master→slave | 50 | 3956 | 18.14 | 18.35 | 19.39 | 20.60 | 20.60 |
+| 50 pps × 64 B | slave→master | 50 | 3940 | 23.03 | 26.21 | 29.02 | 29.52 | 29.52 |
+| 100 pps × 64 B | master→slave | 100 | 7835 | 18.15 | 18.28 | 19.25 | 19.47 | 21.38 |
+| 100 pps × 64 B | slave→master | 100 | 7805 | 20.87 | 24.15 | 29.22 | 36.70 | 38.70 |
+| 突发 64 KiB（1024 B/包） | master→slave | 64 | 11358 | 140.05 | 175.84 | 204.04 | 207.29 | 207.29 |
+| 突发 64 KiB（1024 B/包） | slave→master | 64 | 11338 | 157.37 | 361.82 | 511.87 | 542.29 | 542.29 |
+| 并发 50 pps × 64 B | master→slave | 50 | 3958 | 17.40 | 17.63 | 18.43 | 19.10 | 19.10 |
+| 并发 50 pps × 64 B | slave→master | 50 | 3919 | 23.95 | 27.54 | 30.34 | 31.60 | 31.60 |
+
+突发场景的延时随串口排队增长，但没有合并逻辑帧或丢包；该结果验证了物理 UART 两端的
+独立帧透传和双向并发行为，而非仅验证 CDC 注入路径。权威证据：
+`build/board-e2e/20260809T125547.071261698Z-physical-uart-size-rate-latency-final/summary.json`
+及同目录 expected/received 二进制文件和 raw logs。
+
 ### Final standard-firmware restore gate
 
 完成 loss/恢复测试后，两板均恢复为 SHA-256
@@ -923,7 +953,7 @@ Evidence：
 - 10 s steady state 内两板 validation/runtime/time-UART queue/drop/error 均为 0。
 
 Evidence：
-`build/board-e2e/20260809T122041.411088Z-stage8-final-standard-restore-post-rewire/summary.json`
+`build/board-e2e/20260809T131854.478450Z-stage8-final-standard-restore-post-rewire/summary.json`
 及同目录 raw logs。
 
 ### Remaining external acceptance boundary
