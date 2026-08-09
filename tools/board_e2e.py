@@ -28,6 +28,7 @@ SHELL_PROMPT = b"uart:~$ "
 FLASH_TIMEOUT_S = 20.0
 STATUS_TIMEOUT_S = 30.0
 BRIDGE_TIMEOUT_S = 30.0
+BRIDGE_MAX_LENGTH = 2048
 MASTER_TO_SLAVE_SEED = 49
 SLAVE_TO_MASTER_SEED = 114
 
@@ -63,6 +64,19 @@ def resolve_serial(
         return flash_uf2.serial_port_for(device_id.upper(), serial_by_id)
     except flash_uf2.FlashError as exc:
         raise GateError(str(exc)) from exc
+
+
+def _exact_application_identity_present(
+    device_id: str,
+    serial_by_id: Path = flash_uf2.DEFAULT_SERIAL_BY_ID,
+) -> bool:
+    if not serial_by_id.is_dir():
+        raise GateError(f"serial identity directory is missing: {serial_by_id}")
+    return any(
+        entry.name.startswith(f"{prefix}{device_id.upper()}-if")
+        for entry in serial_by_id.iterdir()
+        for prefix in flash_uf2.SERIAL_PREFIXES
+    )
 
 
 CommandResult = TypeVar("CommandResult")
@@ -122,6 +136,10 @@ def _slave_ready(output: str) -> bool:
         re.search(r"\bsync_state=2\b", output) is not None
         or re.search(r"\bState:\s+LOCKED\b", output) is not None
     )
+
+
+def _current_pair_ready(master_output: str, slave_output: str) -> bool:
+    return _master_ready(master_output) and _slave_ready(slave_output)
 
 
 def _response_marker(command: str) -> bytes | None:
@@ -220,6 +238,9 @@ class BoardSession:
     def history_text(self) -> str:
         return b"".join(self._history).decode("utf-8", errors="replace")
 
+    def history_bytes(self) -> bytes:
+        return b"".join(self._history)
+
     def close(self) -> None:
         if self.serial_port is not None:
             try:
@@ -232,6 +253,10 @@ class BoardSession:
         try:
             resolve_serial(self.device_id)
         except GateError as serial_error:
+            if _exact_application_identity_present(self.device_id):
+                raise GateError(
+                    f"{self.label}: application identity failed closed: {serial_error}"
+                ) from serial_error
             try:
                 flash_uf2.uf2_disk_for(self.device_id)
             except flash_uf2.FlashError as disk_error:
@@ -372,7 +397,14 @@ class BoardSession:
             f"automatic command-timeout recovery={self.recovery_count} "
             f"reflash exact_id={self.device_id}"
         )
-        self.flash()
+        self.close()
+        try:
+            self._flash_once_for_current_state()
+        except GateError as exc:
+            self.event(f"recovery flash attempt=1/1 failed: {exc}")
+            raise
+        self.flash_count += 1
+        self.event(f"recovery flash PASS exact_id={self.device_id} attempt=1/1")
         self.connect()
 
     def command(self, command: str) -> str:
@@ -426,26 +458,23 @@ def _wait_for_radio_ready(master: BoardSession, slave: BoardSession) -> None:
     deadline = time.monotonic() + max(
         STATUS_TIMEOUT_S, master.command_timeout * 3.0, slave.command_timeout * 3.0
     )
-    master_seen = False
-    slave_seen = False
     while time.monotonic() < deadline:
-        master_output = master.command("kernel uptime")
+        master_mark = len(master.history_bytes())
+        slave_mark = len(slave.history_bytes())
+        master.command("kernel uptime")
         slave_output = slave.command("time_sync status")
-        master_seen = master_seen or _master_ready(master_output) or _master_ready(
-            master.history_text()
+        master_fresh = master.history_bytes()[master_mark:].decode(
+            "utf-8", errors="replace"
         )
-        slave_seen = slave_seen or _slave_ready(slave_output) or _slave_ready(
-            slave.history_text()
+        slave_fresh = slave.history_bytes()[slave_mark:].decode(
+            "utf-8", errors="replace"
         )
-        if master_seen and slave_seen:
+        if _current_pair_ready(master_fresh, slave_output + slave_fresh):
             master.event("radio ready active_count=1")
             slave.event("time sync ready sync_state=2/LOCKED")
             return
         time.sleep(0.25)
-    raise GateError(
-        "radio readiness timeout: "
-        f"master_active_count_1={master_seen} slave_locked={slave_seen}"
-    )
+    raise GateError("radio readiness timeout: current active_count=1/LOCKED pair missing")
 
 
 def _wait_for_verify(
@@ -474,8 +503,8 @@ def _wait_for_verify(
     )
 
 
-def _require_runtime_zero_drops(board: BoardSession) -> None:
-    output = board.history_text()
+def _runtime_drop_values(output: str) -> dict[str, int] | None:
+    values: dict[str, int] = {}
     for field in (
         "uart_rx_drop_bytes",
         "uart_tx_drop_bytes",
@@ -483,10 +512,34 @@ def _require_runtime_zero_drops(board: BoardSession) -> None:
     ):
         matches = re.findall(rf"\b{field}=(\d+)\b", output)
         if not matches:
-            raise GateError(f"{board.label}: status field {field} is missing")
-        if int(matches[-1]) != 0:
-            raise GateError(f"{board.label}: {field}={matches[-1]}, expected zero")
-    board.event("runtime queue drops PASS uart_rx=0 uart_tx=0 bridge_queue=0")
+            return None
+        values[field] = int(matches[-1])
+    return values
+
+
+def _require_runtime_zero_drops(output: str, board: str) -> None:
+    values = _runtime_drop_values(output)
+    if values is None:
+        raise GateError(f"{board}: one or more runtime drop fields are missing")
+    for field, value in values.items():
+        if value != 0:
+            raise GateError(f"{board}: {field}={value}, expected zero")
+
+
+def _wait_for_fresh_runtime_zero_drops(board: BoardSession) -> None:
+    history_mark = len(board.history_bytes())
+    deadline = time.monotonic() + max(STATUS_TIMEOUT_S, board.command_timeout * 3.0)
+    while time.monotonic() < deadline:
+        board.command("kernel uptime")
+        fresh_output = board.history_bytes()[history_mark:].decode(
+            "utf-8", errors="replace"
+        )
+        if _runtime_drop_values(fresh_output) is not None:
+            _require_runtime_zero_drops(fresh_output, board.label)
+            board.event("runtime queue drops PASS uart_rx=0 uart_tx=0 bridge_queue=0")
+            return
+        time.sleep(0.1)
+    raise GateError(f"{board.label}: timed out waiting for fresh runtime drop status")
 
 
 def _run_cycle(
@@ -549,8 +602,7 @@ def _run_cycle(
         stats = board.command("bridge_test stats")
         _require_zero_drops(stats, board.label)
         board.event("bridge_test stats PASS input_drop=0 output_drop=0")
-        board.command("kernel uptime")
-        _require_runtime_zero_drops(board)
+        _wait_for_fresh_runtime_zero_drops(board)
         board.event(f"cycle={cycle}/{cycles} PASS")
 
 
@@ -582,8 +634,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             raise GateError("master and slave USB IDs must be distinct")
         if args.cycles < 1:
             raise GateError("--cycles must be >= 1")
-        if not 1 <= args.bridge_length <= 4096:
-            raise GateError("--bridge-length must be in [1, 4096]")
+        if not 1 <= args.bridge_length <= BRIDGE_MAX_LENGTH:
+            raise GateError(
+                f"--bridge-length must be in [1, {BRIDGE_MAX_LENGTH}]"
+            )
         if args.command_timeout <= 0:
             raise GateError("--command-timeout must be > 0")
         for name, uf2 in (("master", args.master_uf2), ("slave", args.slave_uf2)):

@@ -97,6 +97,8 @@
 
 - 分支：`validation/incremental-board-e2e`；基线 HEAD：
   `dd23544771c8405df7f84a1a9dc5d3e996aae402`。
+- Stage 1 reusable gate 初始实现提交：
+  `21749cf37329beed891bc15a8bf5cc3857de6b94`（`test: add reusable dual-board hardware stage gate`）。
 - `git merge-base --is-ancestor effe24c HEAD` 返回 0；已批准设计提交是基线祖先。
 - 开始 Stage 1 时 worktree clean。native 构建报告 Zephyr `4.3.99`、NCS build
   `v3.3.4`、host-tools `0.17.4`、host GCC `15.2.0`；运行 banner 为 NCS
@@ -126,8 +128,12 @@
   /home/hv/ncs/.venv/bin/python -m unittest -v tests/test_flash_uf2.py
   ```
 
-  最终分别为 12/12 和 9/9 tests PASS。timeout 单测证明只恢复一次、重试一次；
-  第二次 timeout 保留 receive tail 并抛错，不会无限循环。
+  最终分别为 26/26 和 11/11 tests PASS。timeout 单测证明只恢复一次、只对 affected
+  board 执行一次 flash attempt、再重试命令一次；第二次 timeout 保留 receive tail
+  并抛错，不会无限循环。runtime drop tests 覆盖三字段全零、任一字段非零和任一字段缺失，
+  并验证只接受 bridge traffic 之后的新 status sample。额外覆盖 recovery 后 reflash、CDC
+  reconnect 和 command retry 的完整顺序，role 不变时不重启、role 改变时 cold reboot，
+  timestamped raw log 落盘，以及 CLI fail-closed 路径。
 
 ### Fresh validation firmware
 
@@ -181,3 +187,43 @@
 - 两板 `bridge_test stats` 均为 `input_drop=0 output_drop=0`；最终 runtime status 均为
   `uart_rx_drop_bytes=0`、`uart_tx_drop_bytes=0`、`queue_drop_bytes=0`。
 - 最终输出：`BOARD_E2E PASS stage=stage1-baseline cycles=1 length=600`；结果 **PASS**。
+
+### Review follow-up rerun
+
+针对 `21749cf37329beed891bc15a8bf5cc3857de6b94` 的 review 修正后，重新执行完整软件和
+硬件验证。fresh validation build 仍使用：
+
+```sh
+./build.sh master -d build/stage1-validation -- -DOVERLAY_CONFIG=validation.conf
+```
+
+- pristine build PASS；`CONFIG_RADIO_BRIDGE_VALIDATION_CDC=y`，FLASH `169440 B`，
+  RAM `188340 B`，UF2 `338944 B`。构建定义中的固件身份为
+  `APP_GIT_VERSION="21749cf37329-dirty"`；UF2 SHA-256 为
+  `f50a5fa4ade1e7fc3de225b862386bbd5e2c6d4df993bef88d76091546cae395`。
+- bridge native suite 93/93、sync native suite 15/15 均 PASS；静态检查 13 PASS、
+  15 intentional SKIP、0 FAIL；Python gate/UF2 suite 分别 26/26 和 11/11 PASS，
+  `ruff` 与 `git diff --check` PASS。
+- `findmnt`、`lsblk` 和 `udisksctl` 共用的 host subprocess 入口现在强制 10 s timeout，
+  `TimeoutExpired` 转换为 `FlashError`，因此 mount/discovery 命令不能永久挂起。CLI
+  bridge length 上限从 4096 对齐 firmware
+  `RB_VALIDATION_BUFFER_SIZE=2048`，`2049` fail-closed 回归测试通过。
+- review 后固定 ID gate 仍使用上面的权威命令和固定 `600` byte 长度；原始 evidence 位于
+  `build/board-e2e/20260809T044822.424582Z-stage1-baseline/`。
+- master 和 slave 均在 flash attempt 1/2 成功；flash retry 和 command-timeout recovery
+  计数均为 0。role 分别为 persisted `role_id=0` 和 `role_id=1`；role 检查后的首次
+  `kernel uptime` 分别为 `8356 ms` 和 `3811 ms`。
+- 本轮 readiness 要求同一次轮询中的当前 master `active_count=1` 与当前 slave
+  `sync_state=2`/`LOCKED` 配对成立，不能由历史状态粘滞满足。
+- master → slave 的 `len=600 seed=49` 和 slave → master 的 `len=600 seed=114` 均
+  exact verify PASS；两板 `bridge_test stats` 均为 `input_drop=0 output_drop=0`。
+- bridge traffic 后等待新的周期 status：master 在 firmware uptime `10.037 s`、slave 在
+  `6.035 s` 报告新样本；两板均为 `uart_rx_drop_bytes=0`、`uart_tx_drop_bytes=0`、
+  `queue_drop_bytes=0`。最终输出为 `BOARD_E2E PASS`，结果 **PASS**。
+
+### Verification boundary
+
+Stage 1 只验证 USB fixed-ID flash/re-enumeration、CDC shell、板上 runtime/status、无线同步状态和
+双向 bridge payload。测试时未连接外部 GNSS/PPS 源或示波器/逻辑分析仪，因此**没有测量外部
+PPS 相位，也没有验证或声明 `<= 20 us` 的外部 PPS 相位误差**。该指标必须在后续带外部 PPS
+参考和测量仪器的阶段单独验证。

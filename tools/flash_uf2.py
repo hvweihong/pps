@@ -36,6 +36,7 @@ SERIAL_PREFIXES = (
 )
 DISK_PREFIX = "usb-Adafruit_nRF_UF2_"
 UF2_LABEL = "XIAO-BOOT"
+HOST_COMMAND_TIMEOUT_S = 10.0
 
 
 class FlashError(RuntimeError):
@@ -96,7 +97,17 @@ def uf2_disk_for(device_id: str, disk_by_id: Path = DEFAULT_DISK_BY_ID) -> Path:
 
 def _run(*args: str) -> str:
     try:
-        result = subprocess.run(args, check=True, text=True, capture_output=True)
+        result = subprocess.run(
+            args,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=HOST_COMMAND_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise FlashError(
+            f"command timed out after {exc.timeout}s: {' '.join(args)}"
+        ) from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise FlashError(f"command failed: {' '.join(args)}: {exc}") from exc
     return result.stdout.strip()

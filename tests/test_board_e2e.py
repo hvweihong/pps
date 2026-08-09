@@ -1,9 +1,11 @@
 import importlib
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def load_board_e2e():
@@ -152,6 +154,28 @@ class ShellOutputTests(unittest.TestCase):
         self.assertFalse(master_ready("active_count=10"))
         self.assertFalse(slave_ready("sync_state=20"))
 
+    def test_readiness_requires_both_current_samples(self):
+        board_e2e = load_board_e2e()
+        current_pair_ready = require_symbol(board_e2e, "_current_pair_ready")
+        self.assertFalse(
+            current_pair_ready(
+                "bridge_link active_count=1",
+                "State:           ACQUIRING",
+            )
+        )
+        self.assertFalse(
+            current_pair_ready(
+                "bridge_link active_count=0",
+                "State:           LOCKED",
+            )
+        )
+        self.assertTrue(
+            current_pair_ready(
+                "bridge_link active_count=1",
+                "State:           LOCKED",
+            )
+        )
+
     def test_command_completion_ignores_log_redraw_prompt_before_echo(self):
         board_e2e = load_board_e2e()
         complete = require_symbol(board_e2e, "_command_response_complete")
@@ -161,8 +185,355 @@ class ShellOutputTests(unittest.TestCase):
         self.assertFalse(complete(response, "param get role_id"))
         self.assertTrue(complete(response + b"uart:~$ ", "param get role_id"))
 
+    def test_runtime_drop_parser_accepts_all_zero_fields(self):
+        board_e2e = load_board_e2e()
+        require_runtime_zero = require_symbol(
+            board_e2e, "_require_runtime_zero_drops"
+        )
+        require_runtime_zero(
+            "bridge_status uart_rx_drop_bytes=0 uart_tx_drop_bytes=0\r\n"
+            "bridge_link queue_drop_bytes=0\r\n",
+            "master",
+        )
+
+    def test_runtime_drop_parser_rejects_each_nonzero_field(self):
+        board_e2e = load_board_e2e()
+        require_runtime_zero = require_symbol(
+            board_e2e, "_require_runtime_zero_drops"
+        )
+        for field in (
+            "uart_rx_drop_bytes",
+            "uart_tx_drop_bytes",
+            "queue_drop_bytes",
+        ):
+            values = {
+                "uart_rx_drop_bytes": 0,
+                "uart_tx_drop_bytes": 0,
+                "queue_drop_bytes": 0,
+            }
+            values[field] = 1
+            output = (
+                f"bridge_status uart_rx_drop_bytes={values['uart_rx_drop_bytes']} "
+                f"uart_tx_drop_bytes={values['uart_tx_drop_bytes']}\r\n"
+                f"bridge_link queue_drop_bytes={values['queue_drop_bytes']}\r\n"
+            )
+            with self.subTest(field=field), self.assertRaises(board_e2e.GateError):
+                require_runtime_zero(output, "slave")
+
+    def test_runtime_drop_parser_rejects_each_missing_field(self):
+        board_e2e = load_board_e2e()
+        require_runtime_zero = require_symbol(
+            board_e2e, "_require_runtime_zero_drops"
+        )
+        fields = (
+            "uart_rx_drop_bytes=0",
+            "uart_tx_drop_bytes=0",
+            "queue_drop_bytes=0",
+        )
+        for missing in fields:
+            output = " ".join(field for field in fields if field != missing)
+            with self.subTest(field=missing), self.assertRaises(board_e2e.GateError):
+                require_runtime_zero(output, "master")
+
+
+class RecoveryFlashTests(unittest.TestCase):
+    def test_timeout_recovery_reflashes_reconnects_and_retries_command(self):
+        board_e2e = load_board_e2e()
+        raw_log = mock.Mock()
+        board = board_e2e.BoardSession(
+            "master",
+            "DBE5C3D84EA2EC6F",
+            Path("firmware.uf2"),
+            1.0,
+            raw_log,
+        )
+        timeout = board_e2e.CommandTimeout("kernel uptime", b"receive tail")
+        with mock.patch.object(
+            board,
+            "_command_once",
+            side_effect=[timeout, "Uptime: 1000 ms"],
+        ) as command_once, mock.patch.object(
+            board, "_flash_once_for_current_state"
+        ) as flash_once, mock.patch.object(board, "connect") as connect:
+            output = board.command("kernel uptime")
+
+        self.assertEqual(output, "Uptime: 1000 ms")
+        self.assertEqual(command_once.call_count, 2)
+        flash_once.assert_called_once_with()
+        connect.assert_called_once_with()
+        self.assertEqual(board.flash_count, 1)
+        self.assertEqual(board.recovery_count, 1)
+
+    def test_timeout_recovery_makes_one_flash_attempt(self):
+        board_e2e = load_board_e2e()
+
+        class RecordingLog:
+            def record(self, direction, payload):
+                pass
+
+        board = board_e2e.BoardSession(
+            "master",
+            "DBE5C3D84EA2EC6F",
+            Path("firmware.uf2"),
+            1.0,
+            RecordingLog(),
+        )
+        flash_error = board_e2e.GateError("flash failed")
+        with mock.patch.object(
+            board, "_flash_once_for_current_state", side_effect=flash_error
+        ) as flash_once, mock.patch.object(board, "connect") as connect:
+            with self.assertRaises(board_e2e.GateError):
+                board.recover()
+
+        flash_once.assert_called_once_with()
+        connect.assert_not_called()
+
+    def test_ambiguous_application_identity_never_falls_back_to_uf2(self):
+        board_e2e = load_board_e2e()
+
+        class RecordingLog:
+            def record(self, direction, payload):
+                pass
+
+        board = board_e2e.BoardSession(
+            "slave",
+            "5B3D71D27A709CA2",
+            Path("firmware.uf2"),
+            1.0,
+            RecordingLog(),
+        )
+        ambiguous = board_e2e.GateError("serial identity is missing or ambiguous")
+        with mock.patch.object(board_e2e, "resolve_serial", side_effect=ambiguous), \
+             mock.patch.object(
+                 board_e2e, "_exact_application_identity_present", return_value=True
+             ), \
+             mock.patch.object(board_e2e.flash_uf2, "uf2_disk_for") as disk_for, \
+             mock.patch.object(board_e2e.flash_uf2, "flash_once") as flash_once:
+            with self.assertRaises(board_e2e.GateError):
+                board._flash_once_for_current_state()
+
+        disk_for.assert_not_called()
+        flash_once.assert_not_called()
+
+
+class RuntimeFreshnessTests(unittest.TestCase):
+    def test_fresh_runtime_check_ignores_stale_nonzero_counters(self):
+        board_e2e = load_board_e2e()
+        wait_for_fresh = require_symbol(
+            board_e2e, "_wait_for_fresh_runtime_zero_drops"
+        )
+
+        class FakeBoard:
+            label = "slave"
+            command_timeout = 0.01
+
+            def __init__(self):
+                self.history = bytearray(
+                    b"uart_rx_drop_bytes=4 uart_tx_drop_bytes=5 "
+                    b"queue_drop_bytes=6"
+                )
+                self.events = []
+
+            def history_bytes(self):
+                return bytes(self.history)
+
+            def command(self, command):
+                self.history.extend(
+                    b" uart_rx_drop_bytes=0 uart_tx_drop_bytes=0 "
+                    b"queue_drop_bytes=0"
+                )
+                return "Uptime: 10 ms"
+
+            def event(self, message):
+                self.events.append(message)
+
+        board = FakeBoard()
+        wait_for_fresh(board)
+        self.assertEqual(
+            board.events,
+            ["runtime queue drops PASS uart_rx=0 uart_tx=0 bridge_queue=0"],
+        )
+
+    def test_fresh_runtime_check_ignores_stale_zero_counters(self):
+        board_e2e = load_board_e2e()
+        wait_for_fresh = require_symbol(
+            board_e2e, "_wait_for_fresh_runtime_zero_drops"
+        )
+
+        class FakeBoard:
+            label = "master"
+            command_timeout = 0.01
+
+            def __init__(self):
+                self.history = bytearray(
+                    b"uart_rx_drop_bytes=0 uart_tx_drop_bytes=0 "
+                    b"queue_drop_bytes=0"
+                )
+
+            def history_bytes(self):
+                return bytes(self.history)
+
+            def command(self, command):
+                self.history.extend(
+                    b" uart_rx_drop_bytes=0 uart_tx_drop_bytes=1 "
+                    b"queue_drop_bytes=0"
+                )
+                return "Uptime: 10 ms"
+
+            def event(self, message):
+                pass
+
+        with self.assertRaises(board_e2e.GateError):
+            wait_for_fresh(FakeBoard())
+
+
+class ReadinessFreshnessTests(unittest.TestCase):
+    def test_readiness_rejects_stale_ready_samples(self):
+        board_e2e = load_board_e2e()
+        wait_for_ready = require_symbol(board_e2e, "_wait_for_radio_ready")
+
+        class FakeBoard:
+            command_timeout = 0.0
+
+            def __init__(self, label, stale, fresh, response):
+                self.label = label
+                self.history = bytearray(stale)
+                self.fresh = fresh
+                self.response = response
+
+            def history_bytes(self):
+                return bytes(self.history)
+
+            def command(self, command):
+                self.history.extend(self.fresh)
+                return self.response
+
+            def event(self, message):
+                pass
+
+        master = FakeBoard(
+            "master",
+            b"active_count=1",
+            b" active_count=0",
+            "Uptime: 10 ms",
+        )
+        slave = FakeBoard(
+            "slave",
+            b"sync_state=2 State: LOCKED",
+            b" sync_state=0",
+            "State:           ACQUIRING",
+        )
+        with mock.patch.object(board_e2e, "STATUS_TIMEOUT_S", 1.0), \
+             mock.patch.object(
+                 board_e2e.time, "monotonic", side_effect=[0.0, 0.0, 2.0]
+             ), \
+             mock.patch.object(board_e2e.time, "sleep"):
+            with self.assertRaises(board_e2e.GateError):
+                wait_for_ready(master, slave)
+
+
+class RoleManagementTests(unittest.TestCase):
+    class FakeBoard:
+        label = "master"
+
+        def __init__(self, outputs):
+            self.outputs = iter(outputs)
+            self.commands = []
+            self.events = []
+            self.reboot_count = 0
+
+        def command(self, command):
+            self.commands.append(command)
+            return next(self.outputs)
+
+        def reboot(self):
+            self.reboot_count += 1
+
+        def event(self, message):
+            self.events.append(message)
+
+    def test_unchanged_role_does_not_reboot(self):
+        board_e2e = load_board_e2e()
+        ensure_role = require_symbol(board_e2e, "_ensure_role")
+        board = self.FakeBoard(
+            [
+                "role_id = 0 (persisted, reboot)",
+                "role_id = 0 (persisted, reboot)",
+            ]
+        )
+
+        self.assertFalse(ensure_role(board, 0))
+        self.assertEqual(
+            board.commands,
+            ["param get role_id", "param get role_id"],
+        )
+        self.assertEqual(board.reboot_count, 0)
+        self.assertEqual(board.events, ["role_id=0 state=already-correct"])
+
+    def test_changed_role_sets_value_and_cold_reboots(self):
+        board_e2e = load_board_e2e()
+        ensure_role = require_symbol(board_e2e, "_ensure_role")
+        board = self.FakeBoard(
+            [
+                "role_id = 1 (persisted, reboot)",
+                "role_id set to 0. Reboot required to apply.",
+                "role_id = 0 (persisted, reboot)",
+            ]
+        )
+
+        self.assertTrue(ensure_role(board, 0))
+        self.assertEqual(
+            board.commands,
+            [
+                "param get role_id",
+                "param set role_id 0",
+                "param get role_id",
+            ],
+        )
+        self.assertEqual(board.reboot_count, 1)
+        self.assertEqual(board.events, ["role_id=0 state=changed-and-rebooted"])
+
+
+class RawLogTests(unittest.TestCase):
+    def test_raw_log_timestamps_and_flushes_each_record(self):
+        board_e2e = load_board_e2e()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "board.raw.log"
+            with mock.patch.object(board_e2e.os, "fsync") as fsync:
+                raw_log = board_e2e.TimestampedRawLog(path)
+                raw_log.record("EVENT", b"cycle=1/1 PASS")
+                raw_log.close()
+
+            content = path.read_text()
+
+        self.assertRegex(
+            content,
+            r"^\[\d{4}-\d{2}-\d{2}T.*Z\] EVENT cycle=1/1 PASS\n$",
+        )
+        fsync.assert_called_once()
+
 
 class CliTests(unittest.TestCase):
+    def test_bridge_length_above_firmware_capacity_fails(self):
+        board_e2e = load_board_e2e()
+        stderr = io.StringIO()
+        with mock.patch.object(sys, "stderr", stderr):
+            result = board_e2e.main(
+                [
+                    "--stage",
+                    "stage1-baseline",
+                    "--master-uf2",
+                    "missing-master.uf2",
+                    "--slave-uf2",
+                    "missing-slave.uf2",
+                    "--bridge-length",
+                    "2049",
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("--bridge-length must be in [1, 2048]", stderr.getvalue())
+
     def test_direct_script_execution_loads_tools_package(self):
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(

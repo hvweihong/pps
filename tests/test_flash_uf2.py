@@ -1,11 +1,49 @@
 import errno
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from tools import flash_uf2
+
+
+class HostCommandTests(unittest.TestCase):
+    def test_host_commands_use_a_bounded_subprocess_timeout(self):
+        commands = (
+            ("findmnt", "-rn", "-S", "/dev/sda", "-o", "TARGET"),
+            ("lsblk", "-dn", "-o", "LABEL", "/dev/sda"),
+            (
+                "udisksctl",
+                "mount",
+                "-b",
+                "/dev/sda",
+                "--no-user-interaction",
+            ),
+        )
+        for command in commands:
+            completed = subprocess.CompletedProcess(command, 0, stdout="")
+            with self.subTest(command=command), mock.patch.object(
+                flash_uf2.subprocess, "run", return_value=completed
+            ) as run:
+                flash_uf2._run(*command)
+
+            timeout = run.call_args.kwargs.get("timeout")
+            self.assertIsNotNone(timeout)
+            self.assertGreater(timeout, 0)
+
+    def test_host_command_timeout_is_reported_as_flash_error(self):
+        command = ("findmnt", "-rn", "-S", "/dev/sda", "-o", "TARGET")
+        with mock.patch.object(
+            flash_uf2.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(command, 1.0),
+        ):
+            with self.assertRaisesRegex(
+                flash_uf2.FlashError, "command timed out"
+            ):
+                flash_uf2._run(*command)
 
 
 class FlashDiscoveryTests(unittest.TestCase):
