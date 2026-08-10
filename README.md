@@ -10,12 +10,11 @@ Zephyr SDK 0.17.4 和板目标 `xiao_ble/nrf52840`。构建脚本默认在
 `NCS_WORKSPACE`、`ZEPHYR_BASE`、`ZEPHYR_VENV` 和
 `ZEPHYR_SDK_INSTALL_DIR` 覆盖。
 
-同一份镜像通过 NVS 配置为 master 或 slave。`master` 参数只命名默认构建目录，
-不会把角色固化进镜像。
+同一份镜像通过 NVS 配置为 master 或 slave，构建阶段不区分角色。
 
 ```bash
-./build.sh master -d build/production
-./build.sh master -d build/validation -- -DOVERLAY_CONFIG=validation.conf
+./build.sh -d build/production
+./build.sh -d build/validation -- -DOVERLAY_CONFIG=validation.conf
 ```
 
 - `build/production/zephyr/zephyr.uf2`：生产固件，物理 UART bridge、无线时间同步、

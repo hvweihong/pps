@@ -14,15 +14,14 @@ ZEPHYR_SDK_INSTALL_DIR="${ZEPHYR_SDK_INSTALL_DIR:-${USER_HOME}/zephyr-sdk-0.17.4
 BOARD="${BOARD:-xiao_ble/nrf52840}"
 BUILD_DIR="${BUILD_DIR:-}"
 PRISTINE="always"
-MODE="unified"
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [master|slave] [options] [-- extra west build args]
+Usage: $(basename "$0") [options] [-- extra west build args]
 
 Options:
   -b, --board BOARD        Zephyr board target. Default: ${BOARD}
-  -d, --build-dir DIR      Build output directory. Default: build/<role>
+  -d, --build-dir DIR      Build output directory. Default: build/
       --no-pristine        Reuse the existing build directory.
   -h, --help              Show this help.
 
@@ -39,15 +38,6 @@ Note: This firmware builds a unified image. Role (master/slave) is configured
       at runtime via NVS and CDC shell command 'param set role_id 0|1|2|3'.
 EOF
 }
-
-if [[ $# -gt 0 ]]; then
-	case "$1" in
-		master|slave)
-			MODE="$1"
-			shift
-			;;
-	esac
-fi
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -72,7 +62,9 @@ while [[ $# -gt 0 ]]; do
 			break
 			;;
 		*)
-			break
+			echo "error: unexpected argument: $1" >&2
+			usage >&2
+			exit 2
 			;;
 	esac
 done
@@ -113,14 +105,9 @@ export PATH="${ZEPHYR_VENV}/bin:${PATH}"
 export ZEPHYR_BASE
 export ZEPHYR_SDK_INSTALL_DIR
 
-case "${MODE}" in
-	master) BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build/master}" ;;
-	slave) BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build/slave}" ;;
-	*) BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build}" ;;
-esac
+BUILD_DIR="${BUILD_DIR:-${APP_DIR}/build}"
 
 echo "Building ${APP_DIR}"
-echo "Mode: ${MODE} (runtime role via NVS)"
 echo "Board: ${BOARD}"
 echo "Build dir: ${BUILD_DIR}"
 
