@@ -30,10 +30,10 @@ Zephyr SDK 0.17.4 和板目标 `xiao_ble/nrf52840`。构建脚本默认在
 
 | 用途 | 板端 TX | 板端 RX/输入 | 默认配置 | 说明 |
 | --- | --- | --- | --- | --- |
-| 数据 UART bridge (`uart0`) | P1.11 | P1.12 | 921600 baud | master/slave 业务数据 |
-| 外部时间 UART (`uart1`) | P0.04 | P0.05 | 9600 baud | external master 接收 NMEA RMC/ZDA |
-| PPS 输出 | P0.03 | - | 1 Hz，100 ms 高电平 | 所有角色输出 |
-| PPS 输入 | - | P0.02 | 上升沿捕获 | 仅 external master 使用 |
+| 数据 UART bridge (`uart0`) | P1.11（D6） | P1.12（D7） | 921600 baud | master/slave 业务数据 |
+| 外部时间 UART (`uart1`) | P0.04（D4） | P0.05（D5） | 9600 baud | external master 接收 NMEA RMC/ZDA |
+| PPS 输出 | P0.03（D1） | - | 1 Hz，100 ms 高电平 | 所有角色输出 |
+| PPS 输入 | - | P0.02（D0） | 上升沿捕获 | 仅 external master 使用 |
 | USB CDC | USB | USB | 115200 line coding | shell、日志；validation 测试通道 |
 
 ```text
