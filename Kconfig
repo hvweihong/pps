@@ -1,0 +1,105 @@
+source "Kconfig.zephyr"
+
+menu "Star radio UART bridge"
+
+config RADIO_BRIDGE_GROUP_ID
+	int "Group identifier"
+	default 1
+	range 1 4294967294
+
+config RADIO_BRIDGE_GROUP_KEY
+	string "Group AES-128 key (32 hexadecimal characters)"
+	default "00112233445566778899aabbccddeeff"
+
+config RADIO_BRIDGE_UART_BAUDRATE
+	int "Data UART baud rate"
+	default 921600
+	range 1200 3000000
+
+config TIME_UART_BAUDRATE
+	int "External time UART baud rate"
+	default 9600
+	range 1200 115200
+
+config RADIO_BRIDGE_UART_RING_SIZE
+	int "Bytes in each data UART ring"
+	default 16384
+	range 16384 32768
+
+config RADIO_BRIDGE_AGGREGATION_TIMEOUT_US
+	int "Partial radio payload aggregation timeout"
+	default 1000
+	range 100 10000
+
+config RADIO_BRIDGE_SYNC_INTERVAL_US
+	int "Wireless sync/discovery interval"
+	default 100000
+	range 10000 1000000
+
+config RADIO_BRIDGE_RESPONSE_SLOT_COUNT
+	int "Discovery response slots"
+	default 8
+	range 1 32
+
+config RADIO_BRIDGE_RESPONSE_SLOT_US
+	int "Discovery response slot width"
+	default 500
+	range 100 5000
+
+config RADIO_BRIDGE_ASSIGNMENT_WINDOW_US
+	int "Assignment receive window"
+	default 6000
+	range 1000 50000
+
+config RADIO_BRIDGE_LEASE_TIMEOUT_US
+	int "Lease timeout without a valid poll"
+	default 100000
+	range 10000 1000000
+
+config RADIO_BRIDGE_IDLE_POLL_MAX_US
+	int "Maximum idle poll interval"
+	default 5000
+	range 1000 5000
+
+config TIME_SYNC_PPS_WIDTH_US
+	int "PPS pulse width"
+	default 100000
+	range 10 500000
+
+config TIME_SYNC_RADIO_DELAY_US
+	int "Calibrated slave radio delay"
+	default 0
+	range 0 1000
+
+config TIME_SYNC_STATUS_INTERVAL_MS
+	int "Status log interval"
+	default 1000
+	range 100 10000
+
+config TIME_SYNC_LED_HEARTBEAT
+	bool "Blink board LED"
+	default y
+
+config TIME_SYNC_LED_HEARTBEAT_PERIOD_MS
+	int "LED period"
+	default 1000
+	range 100 10000
+	depends on TIME_SYNC_LED_HEARTBEAT
+
+config RADIO_BRIDGE_TEST_LOSS_INJECTION
+	bool "Enable radio packet loss injection for testing"
+	default n
+	help
+	  When enabled, selected frame types can be dropped before transmission
+	  or before queueing received frames.  Never enable in production role
+	  configs (master.conf / slave.conf).
+
+config RADIO_BRIDGE_VALIDATION_CDC
+	bool "Enable CDC bridge payload validation commands"
+	default n
+	depends on SHELL
+	help
+	  Adds validation-only pattern injection and verification at the physical
+	  UART/scheduler boundary. Keep disabled in production firmware.
+
+endmenu

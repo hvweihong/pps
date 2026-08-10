@@ -1,0 +1,9 @@
+build/
+*.elf
+*.hex
+*.uf2
+*.bin
+*.map
+*.log
+.cache/
+.west/
