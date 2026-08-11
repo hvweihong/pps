@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20.0)
+
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(radio_tests)
+
+target_include_directories(app PRIVATE
+	../../../src/bridge
+	../../../src/radio
+)
+target_sources(app PRIVATE
+	src/test_radio_address.c
+	src/test_radio_transport_policy.c
+	../../../src/radio/radio_address.c
+	../../../src/radio/radio_transport_policy.c
+)
