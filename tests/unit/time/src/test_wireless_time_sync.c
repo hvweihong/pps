@@ -5,7 +5,7 @@
 ZTEST(wireless_time_sync, test_master_first_frame_has_no_previous_capture)
 {
 	struct rb_wireless_time_sync sync;
-	struct rb_sync_discovery frame;
+	struct rb_sync_frame frame;
 
 	wireless_time_sync_init(&sync, 7, 100000, 1000000, 0);
 	zassert_ok(wireless_time_sync_master_build(&sync, 1000000, &frame));
@@ -20,12 +20,12 @@ ZTEST(wireless_time_sync, test_master_first_frame_has_no_previous_capture)
 ZTEST(wireless_time_sync, test_slave_pairs_two_consecutive_sync_frames)
 {
 	struct rb_wireless_time_sync sync;
-	struct rb_sync_discovery first;
-	struct rb_sync_discovery second;
+	struct rb_sync_frame first;
+	struct rb_sync_frame second;
 	struct sync_observation observation;
 
 	wireless_time_sync_init(&sync, 0, 100000, 0, 17);
-	first.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 9, 0, 0);
+	first.common = RB_COMMON_INIT(RB_FRAME_SYNC, 9, 0);
 	first.sync_sequence = 1;
 	first.next_pps_master_tick = 1000000;
 	second = first;

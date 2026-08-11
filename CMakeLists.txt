@@ -31,13 +31,14 @@ target_sources(app PRIVATE
 	src/bridge/byte_ring.c
 	src/bridge/record_queue.c
 	src/bridge/link_protocol.c
-	src/bridge/link_window.c
-	src/bridge/membership.c
+	src/bridge/fixed_peer_table.c
 	src/bridge/link_scheduler_core.c
 	src/bridge/uart_bridge.c
+	src/bridge/uart_rx_recovery.c
 	src/bridge/bridge_runtime.c
 	src/radio/radio_address.c
 	src/radio/radio_address_crypto.c
+	src/radio/radio_transport_policy.c
 	src/radio/radio_transport.c
 	src/time/wireless_time_sync.c
 	src/time/sync_tracker.c
@@ -52,12 +53,14 @@ target_sources(app PRIVATE
 	src/time/time_sync_shell.c
 	src/app/status.c
 	src/app/heartbeat_led.c
+	src/app/boot_recovery.c
 	src/app/main.c
 )
 
 target_sources_ifdef(CONFIG_RADIO_BRIDGE_VALIDATION_CDC app PRIVATE
 	src/validation/bridge_validation.c
 	src/validation/bridge_validation_shell.c
+	src/validation/boot_validation_shell.c
 )
 
 set(APP_GIT_VERSION "unknown")

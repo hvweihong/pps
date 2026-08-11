@@ -10,6 +10,139 @@ from unittest import mock
 
 from tests.host.support import load_board_e2e, require_symbol
 
+
+def make_three_board_args():
+    return mock.Mock(
+        master_id="DBE5C3D84EA2EC6F",
+        slave_id="5B3D71D27A709CA2",
+        slave2_id="DD01F9DF462D68A5",
+        master_uf2=Path("firmware.uf2"),
+        slave_uf2=Path("firmware.uf2"),
+        slave2_uf2=Path("firmware.uf2"),
+    )
+
+
+class BoardPlanTests(unittest.TestCase):
+    def test_second_slave_id_and_uf2_must_be_paired(self):
+        board_e2e = load_board_e2e()
+        args = make_three_board_args()
+        args.slave2_uf2 = None
+
+        with self.assertRaisesRegex(board_e2e.GateError, "must be provided together"):
+            board_e2e._validate_board_plan(args)
+
+    def test_three_board_ids_must_be_unique(self):
+        board_e2e = load_board_e2e()
+        args = make_three_board_args()
+        args.slave2_id = args.slave_id
+
+        with self.assertRaisesRegex(board_e2e.GateError, "must be distinct"):
+            board_e2e._validate_board_plan(args)
+
+    def test_three_board_plan_assigns_fixed_roles(self):
+        board_e2e = load_board_e2e()
+        plan = board_e2e._validate_board_plan(make_three_board_args())
+
+        self.assertEqual(
+            [(item.label, item.role_id) for item in plan],
+            [("master", 0), ("slave1", 1), ("slave2", 2)],
+        )
+
+    def test_latency_summary_reports_min_median_p95_and_max(self):
+        board_e2e = load_board_e2e()
+        summary = board_e2e._latency_summary_ms([1.0, 2.0, 3.0, 20.0])
+
+        self.assertEqual(summary["min"], 1.0)
+        self.assertEqual(summary["median"], 2.5)
+        self.assertEqual(summary["p95"], 20.0)
+        self.assertEqual(summary["max"], 20.0)
+
+
+class InjectionCommandTests(unittest.TestCase):
+    def test_inject_pattern_selects_instant_or_uart_paced_command(self):
+        board_e2e = load_board_e2e()
+        board = mock.Mock(label="master")
+        board.command.side_effect = lambda command: (
+            f"bridge_test {'inject_uart' if 'inject_uart' in command else 'inject'} "
+            "ok len=2048 seed=51"
+        )
+
+        board_e2e._inject_pattern(board, 2048, 51)
+        board_e2e._inject_pattern(board, 2048, 51, paced=True)
+
+        self.assertEqual(
+            board.command.call_args_list,
+            [
+                mock.call("bridge_test inject 2048 51"),
+                mock.call("bridge_test inject_uart 2048 51"),
+            ],
+        )
+
+    def test_three_board_paths_select_uart_paced_injection(self):
+        source = Path("tools/board_e2e.py").read_text(encoding="utf-8")
+        broadcast = source[
+            source.index("def _run_best_effort_broadcast_gate") :
+            source.index("def _merge_latency_samples")
+        ]
+        smoke = source[
+            source.index("def _run_three_board_smoke_gate") :
+            source.index("def _run_bidirectional_bridge_gate")
+        ]
+        matrix = source[
+            source.index("def _run_three_board_bridge_gate") :
+            source.index("def _run_downlink_loss_gate")
+        ]
+
+        self.assertIn("_inject_pattern(master, length, attempt_seed, paced=True)", broadcast)
+        self.assertIn("_run_best_effort_broadcast_gate(", smoke)
+        self.assertIn("_run_best_effort_broadcast_gate(", matrix)
+        self.assertEqual(smoke.count("paced=True"), 1)
+        self.assertEqual(matrix.count("paced=True"), 3)
+
+
+class ThreeBoardCycleTests(unittest.TestCase):
+    def test_cycle_flashes_configures_and_runs_three_board_matrix(self):
+        board_e2e = load_board_e2e()
+
+        def fake_board(label):
+            board = mock.Mock(label=label)
+            board.command.side_effect = lambda command: (
+                "Uptime: 12000 ms"
+                if command == "kernel uptime"
+                else "bridge_test clear ok"
+            )
+            return board
+
+        master = fake_board("master")
+        slave1 = fake_board("slave1")
+        slave2 = fake_board("slave2")
+        expected_latency = {"master_to_slave1": [1.25]}
+        with (
+            mock.patch.object(board_e2e, "_ensure_role") as ensure_role,
+            mock.patch.object(board_e2e, "_wait_for_radio_ready") as wait_ready,
+            mock.patch.object(
+                board_e2e,
+                "_run_three_board_bridge_gate",
+                return_value=expected_latency,
+            ) as bridge_gate,
+        ):
+            latency = board_e2e._run_cycle(
+                master, [slave1, slave2], 1, 1, 600, 1
+            )
+
+        for board in (master, slave1, slave2):
+            board.flash.assert_called_once_with()
+            board.connect.assert_called_once_with()
+            board.clear_history.assert_called_once_with()
+        self.assertEqual(
+            ensure_role.call_args_list,
+            [mock.call(master, 0), mock.call(slave1, 1), mock.call(slave2, 2)],
+        )
+        wait_ready.assert_called_once_with(master, [slave1, slave2])
+        bridge_gate.assert_called_once_with(master, [slave1, slave2])
+        self.assertEqual(latency, expected_latency)
+
+
 class RecoveryFlashTests(unittest.TestCase):
     def test_flash_counts_retry_attempt_when_both_attempts_fail(self):
         board_e2e = load_board_e2e()
@@ -230,6 +363,36 @@ class RecoveryFlashTests(unittest.TestCase):
             no_1200_touch=False,
         )
 
+    def test_application_flash_recovers_when_shell_prompt_is_unavailable(self):
+        board_e2e = load_board_e2e()
+        board = board_e2e.BoardSession(
+            "slave",
+            "5B3D71D27A709CA2",
+            Path("firmware.uf2"),
+            1.0,
+            mock.Mock(),
+        )
+        shell_error = board_e2e.GateError("shell readiness timed out")
+
+        with (
+            mock.patch.object(
+                board_e2e, "resolve_serial", return_value=Path("/dev/exact-board")
+            ),
+            mock.patch.object(board, "connect", side_effect=shell_error),
+            mock.patch.object(board, "event") as event,
+            mock.patch.object(board_e2e.flash_uf2, "flash_once") as flash_once,
+        ):
+            board._flash_once_for_current_state()
+
+        event.assert_called_once()
+        self.assertIn("1200-baud recovery", event.call_args.args[0])
+        flash_once.assert_called_once_with(
+            board.device_id,
+            board.uf2,
+            board_e2e.FLASH_TIMEOUT_S,
+            no_1200_touch=False,
+        )
+
     def test_timeout_recovery_reflashes_reconnects_and_retries_command(self):
         board_e2e = load_board_e2e()
         raw_log = mock.Mock()
@@ -388,6 +551,71 @@ class SteadyStateTests(unittest.TestCase):
         self.assertEqual(slave.events, ["steady state PASS seconds=30"])
 
 
+class RuntimeDropTests(unittest.TestCase):
+    def test_runtime_drop_check_uses_on_demand_stats_command(self):
+        board_e2e = load_board_e2e()
+
+        class FakeBoard:
+            label = "slave"
+            queue_drops = 0
+
+            def __init__(self):
+                self.commands = []
+                self.events = []
+
+            def command(self, command):
+                self.commands.append(command)
+                return (
+                    "bridge_test stats uart_rx_drop_bytes=0 "
+                    "uart_tx_drop_bytes=0 queue_drop_bytes=0 "
+                    "radio_event_drop_count=0"
+                )
+
+            def event(self, message):
+                self.events.append(message)
+
+        board = FakeBoard()
+        board_e2e._wait_for_fresh_runtime_zero_drops(board)
+
+        self.assertEqual(board.commands, ["bridge_test stats"])
+        self.assertEqual(
+            board.events,
+            [
+                "runtime queue drops PASS uart_rx=0 uart_tx=0 "
+                "bridge_queue=0 radio_event=0"
+            ],
+        )
+
+    def test_time_uart_check_uses_on_demand_stats_command(self):
+        board_e2e = load_board_e2e()
+
+        class FakeBoard:
+            label = "slave"
+
+            def __init__(self):
+                self.commands = []
+                self.events = []
+
+            def command(self, command):
+                self.commands.append(command)
+                return (
+                    "bridge_test time_uart rx_drop_bytes=0 "
+                    "overlong_line_drops=0 output_line_drops=0 "
+                    "rx_restart_errors=0 rx_buffer_errors=0 "
+                    "rx_stopped_events=0 rx_stop_reason_mask=0 "
+                    "pps_input_drop_count=0"
+                )
+
+            def event(self, message):
+                self.events.append(message)
+
+        board = FakeBoard()
+        board_e2e._wait_for_fresh_time_uart_zero_errors(board)
+
+        self.assertEqual(board.commands, ["bridge_test stats"])
+        self.assertEqual(board.events, ["time UART input errors and drops PASS"])
+
+
 class RawLogTests(unittest.TestCase):
     def test_raw_log_timestamps_and_flushes_each_record(self):
         board_e2e = load_board_e2e()
@@ -414,6 +642,7 @@ class StageResultTests(unittest.TestCase):
             "slave_to_master": True,
             "queue_drops": 0,
             "recoveries": 0,
+            "recovery_limit": 1,
         }
 
     def test_requires_both_bridge_directions(self):
@@ -442,11 +671,21 @@ class StageResultTests(unittest.TestCase):
 
         validate(result)
 
-    def test_rejects_two_recoveries(self):
+    def test_allows_one_recovery_per_board(self):
         board_e2e = load_board_e2e()
         validate = require_symbol(board_e2e, "validate_stage_result")
         result = self.valid_result()
         result["recoveries"] = 2
+        result["recovery_limit"] = 3
+
+        validate(result)
+
+    def test_rejects_recoveries_above_board_budget(self):
+        board_e2e = load_board_e2e()
+        validate = require_symbol(board_e2e, "validate_stage_result")
+        result = self.valid_result()
+        result["recoveries"] = 4
+        result["recovery_limit"] = 3
 
         with self.assertRaises(board_e2e.GateError):
             validate(result)
@@ -531,6 +770,60 @@ class RunnerEvidenceTests(unittest.TestCase):
         self.assertTrue(raw_logs_exist)
         self.assertRegex(summary["started_at"], r"Z$")
         self.assertRegex(summary["ended_at"], r"Z$")
+        self.assertIn("watchdog_restarts_per_board=0", stdout.getvalue())
+
+    def test_three_board_success_saves_each_board_log_and_summary(self):
+        board_e2e = load_board_e2e()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            evidence_root = temp_root / "evidence"
+            master_uf2, slave_uf2, args = self._firmware_args(temp_root)
+            slave2_uf2 = temp_root / "slave2.uf2"
+            slave2_uf2.write_bytes(b"slave2 firmware")
+            args.extend(
+                [
+                    "--slave2-id",
+                    "DD01F9DF462D68A5",
+                    "--slave2-uf2",
+                    str(slave2_uf2),
+                ]
+            )
+            with (
+                mock.patch.object(board_e2e, "EVIDENCE_ROOT", evidence_root),
+                mock.patch.object(
+                    board_e2e,
+                    "_run_cycle",
+                    return_value={
+                        "master_to_slave1": [1.0, 2.0],
+                        "slave1_to_master": [3.0],
+                    },
+                ),
+                mock.patch.object(sys, "stdout", io.StringIO()),
+            ):
+                return_code = board_e2e.main(args)
+
+            summary = self._only_summary(evidence_root)
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(
+            summary["board_ids"],
+            {
+                "master": board_e2e.MASTER_ID,
+                "slave1": board_e2e.SLAVE_ID,
+                "slave2": "DD01F9DF462D68A5",
+            },
+        )
+        self.assertEqual(
+            set(summary["raw_log_paths"]), {"master", "slave1", "slave2"}
+        )
+        self.assertEqual(set(summary["boards"]), {"master", "slave1", "slave2"})
+        self.assertEqual(
+            summary["latency_ms"]["samples"]["master_to_slave1"], [1.0, 2.0]
+        )
+        self.assertEqual(
+            summary["latency_ms"]["summary"]["master_to_slave1"],
+            {"min": 1.0, "median": 1.5, "p95": 2.0, "max": 2.0},
+        )
 
     def test_failure_saves_incomplete_summary_and_known_counts(self):
         board_e2e = load_board_e2e()
@@ -704,7 +997,7 @@ class RunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(summary["queue_drops"], 5)
         self.assertIn("input_drop=2 output_drop=3", summary["error"])
 
-    def test_second_board_recovery_is_rejected_before_reflash(self):
+    def test_each_board_has_an_independent_recovery_budget(self):
         board_e2e = load_board_e2e()
         recovery_flashes = {}
 
@@ -715,6 +1008,7 @@ class RunnerEvidenceTests(unittest.TestCase):
                 board.connect = mock.Mock()
             master.recover()
             slave.recover()
+            raise board_e2e.GateError("simulated stage failure")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -733,12 +1027,104 @@ class RunnerEvidenceTests(unittest.TestCase):
 
         self.assertEqual(return_code, 1)
         recovery_flashes["master"].assert_called_once_with()
-        recovery_flashes["slave"].assert_not_called()
-        self.assertEqual(summary["recoveries"], 1)
-        self.assertIn("slave: automatic recovery budget exhausted", summary["error"])
+        recovery_flashes["slave"].assert_called_once_with()
+        self.assertEqual(summary["recoveries"], 2)
+        self.assertIn("simulated stage failure", summary["error"])
+
+
+class ThreeBoardRestartTests(unittest.TestCase):
+    def fake_board(self, label):
+        board = mock.Mock(label=label, command_timeout=1.0, queue_drops=0)
+        board.recovery_count = 0
+        board.flash_count = 0
+        board.flash_retry_count = 0
+        return board
+
+    def test_cold_restart_is_sequential_and_observes_reduced_masks(self):
+        board_e2e = load_board_e2e()
+        master = self.fake_board("master")
+        slave1 = self.fake_board("slave1")
+        slave2 = self.fake_board("slave2")
+        with (
+            mock.patch.object(
+                board_e2e,
+                "_uptime_ms",
+                side_effect=[12000, 100, 13000, 120, 14000, 140],
+            ),
+            mock.patch.object(board_e2e, "_wait_for_boot_guard_clear"),
+            mock.patch.object(board_e2e, "_wait_for_active_mask") as wait_mask,
+            mock.patch.object(board_e2e, "_wait_for_radio_ready") as wait_ready,
+            mock.patch.object(board_e2e, "_wait_for_fresh_runtime_zero_drops"),
+            mock.patch.object(board_e2e, "_wait_for_fresh_time_uart_zero_errors"),
+            mock.patch.object(board_e2e, "_run_three_board_smoke_gate") as smoke,
+            mock.patch.object(board_e2e.time, "sleep"),
+        ):
+            board_e2e._run_cold_reboot_cycles(
+                master, [slave1, slave2], 1, bridge_length=600
+            )
+
+        for board in (master, slave1, slave2):
+            board.reboot_and_disconnect.assert_called_once_with()
+            board.connect.assert_called_once_with()
+            board.flash.assert_not_called()
+        self.assertEqual(
+            wait_mask.call_args_list,
+            [mock.call(master, 0x02), mock.call(master, 0x01)],
+        )
+        self.assertEqual(wait_ready.call_count, 3)
+        self.assertEqual(smoke.call_count, 3)
+
+    def test_watchdog_restart_checks_each_board_without_touching_peers(self):
+        board_e2e = load_board_e2e()
+        master = self.fake_board("master")
+        slave1 = self.fake_board("slave1")
+        slave2 = self.fake_board("slave2")
+        with (
+            mock.patch.object(board_e2e, "_wait_for_active_mask") as wait_mask,
+            mock.patch.object(board_e2e, "_wait_for_radio_ready") as wait_ready,
+            mock.patch.object(board_e2e, "_wait_for_boot_guard_clear"),
+            mock.patch.object(board_e2e, "_wait_for_fresh_runtime_zero_drops"),
+            mock.patch.object(board_e2e, "_wait_for_fresh_time_uart_zero_errors"),
+            mock.patch.object(board_e2e, "_run_three_board_smoke_gate") as smoke,
+        ):
+            board_e2e._run_watchdog_reboot_cycles(
+                master, [slave1, slave2], cycles=1, bridge_length=600
+            )
+
+        for board in (master, slave1, slave2):
+            board.watchdog_reset_begin.assert_called_once_with()
+            board.connect.assert_called_once_with(wait_timeout=40.0)
+            board.require_watchdog_recovery.assert_called_once_with(
+                board.watchdog_reset_begin.return_value
+            )
+            board.flash.assert_not_called()
+            board.reboot.assert_not_called()
+        self.assertEqual(
+            wait_mask.call_args_list,
+            [mock.call(master, 0x02), mock.call(master, 0x01)],
+        )
+        self.assertEqual(wait_ready.call_count, 3)
+        self.assertEqual(smoke.call_count, 3)
 
 
 class CliTests(unittest.TestCase):
+    def test_watchdog_restarts_option_is_parsed(self):
+        board_e2e = load_board_e2e()
+        args = board_e2e.build_parser().parse_args(
+            [
+                "--stage",
+                "restart",
+                "--master-uf2",
+                "master.uf2",
+                "--slave-uf2",
+                "slave.uf2",
+                "--watchdog-restarts-per-board",
+                "1",
+            ]
+        )
+
+        self.assertEqual(args.watchdog_restarts_per_board, 1)
+
     def test_bridge_repeats_option_is_parsed(self):
         board_e2e = load_board_e2e()
         args = board_e2e.build_parser().parse_args(

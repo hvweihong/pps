@@ -1,428 +1,229 @@
 #include <errno.h>
 #include <stdint.h>
-#include <string.h>
 
 #include <zephyr/ztest.h>
 
 #include "link_scheduler_core.h"
 
 static struct rb_scheduler_core slave;
-static struct rb_scheduler_config slave_config;
 
 static void init_slave(void)
 {
-	slave_config = (struct rb_scheduler_config){
+	const struct rb_scheduler_config config = {
 		.master = false,
-		.group_id = 41,
-		.master_session = 7,
-		.device_id = 10,
-		.sync_interval_us = 100000,
-		.lease_timeout_us = 100000,
-		.response_slot_count = 8,
-		.response_slot_us = 500,
+		.node_id = 2u,
+		.group_id = 41u,
+		.master_session = 1u,
+		.slave_session = 0x12345678u,
+		.sync_interval_us = 100000u,
+		.lease_timeout_us = 100000u,
 	};
-	rb_scheduler_init(&slave, &slave_config);
+
+	rb_scheduler_init(&slave, &config);
 }
 
-static void deliver(const uint8_t *wire, size_t len, uint64_t tick)
+static void deliver_wire(uint8_t pipe, const uint8_t *wire, size_t len,
+			 uint64_t now_us)
 {
-	struct rb_radio_event_view event = {
+	const struct rb_radio_event_view event = {
 		.type = RB_EVENT_VIEW_RX_RECEIVED,
-		.address_tick = tick,
+		.pipe = pipe,
+		.address_tick = now_us,
 		.wire = wire,
 		.wire_len = len,
 	};
-	rb_scheduler_on_radio_event(&slave, &event, tick);
+
+	rb_scheduler_on_radio_event(&slave, &event, now_us);
 }
 
-static void complete_tx(enum rb_radio_event_view_type type, uint64_t tick)
+static void deliver_sync(uint32_t group_id, uint32_t master_session,
+			 uint64_t now_us)
 {
-	struct rb_radio_event_view event = {
-		.type = type,
-	};
-
-	rb_scheduler_on_radio_event(&slave, &event, tick);
-}
-
-static void activate_slave(uint16_t downlink_epoch)
-{
-	struct rb_assign assign = {
-		.common = RB_COMMON_INIT(RB_FRAME_ASSIGN, 7, 0x55aa, 0),
-		.target_device_id = 10,
-		.node_id = 1,
-		.pipe = 1,
-		.downlink_epoch = downlink_epoch,
-		.uplink_epoch = 8,
-		.max_payload = RB_PACKET_DATA_MAX,
-		.link_window = 64,
-		.retry_count = 3,
-		.lease_timeout_us = 100000,
+	struct rb_sync_frame sync = {
+		.common = RB_COMMON_INIT(RB_FRAME_SYNC, master_session, 0u),
+		.group_id = group_id,
+		.master_id = 1u,
+		.sync_sequence = 1u,
+		.next_pps_master_tick = 1000000u,
+		.sync_interval_us = 100000u,
 	};
 	uint8_t wire[RB_ESB_MAX_PAYLOAD];
 	size_t len;
 
-	zassert_ok(rb_assign_encode(&assign, wire, sizeof(wire), &len));
-	deliver(wire, len, 10000);
+	zassert_ok(rb_sync_encode(&sync, wire, sizeof(wire), &len));
+	deliver_wire(0u, wire, len, now_us);
 }
 
-ZTEST(slave_scheduler, test_matching_discovery_schedules_hashed_slot_hello)
+static void deliver_poll(uint8_t pipe, uint32_t master_session,
+			 uint32_t known_slave_session,
+			 uint32_t ack_sequence, uint64_t now_us)
 {
-	struct rb_sync_discovery sync = {
-		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 9, 0, 0),
-		.group_id = 41,
-		.sync_sequence = 2,
-		.discovery_nonce = 0xabc,
-		.free_slots = 1,
-		.response_slot_count = 8,
-		.response_slot_us = 500,
-	};
-	struct rb_scheduler_action action;
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	size_t len;
-
-	init_slave();
-	zassert_ok(rb_sync_discovery_encode(&sync, wire, sizeof(wire), &len));
-	deliver(wire, len, 10000);
-	zassert_equal(rb_scheduler_next_action(&slave, 10999, &action), -EAGAIN);
-	zassert_ok(rb_scheduler_next_action(&slave, 11000, &action));
-	zassert_equal(action.type, RB_ACTION_SEND_HELLO);
-	zassert_equal(action.due_tick, 0);
-	zassert_true(slave.transaction_in_flight);
-	zassert_equal(rb_scheduler_next_action(&slave, 11001 + 8 * 500, &action),
-		      -EAGAIN);
-	complete_tx(RB_EVENT_VIEW_TX_SUCCESS, 11050);
-	zassert_ok(rb_scheduler_next_action(&slave, 11001 + 8 * 500, &action));
-	zassert_equal(action.type, RB_ACTION_ENTER_ASSIGN_RX);
-
-	/* A group mismatch never arms a response. */
-	init_slave();
-	sync.group_id = 42;
-	zassert_ok(rb_sync_discovery_encode(&sync, wire, sizeof(wire), &len));
-	deliver(wire, len, 10000);
-	zassert_equal(rb_scheduler_next_action(&slave, 20000, &action), -EAGAIN);
-}
-
-ZTEST(slave_scheduler, test_mismatched_group_discovery_changes_no_state)
-{
-	struct rb_sync_discovery sync = {
-		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 99, 0, 0),
-		.group_id = 42,
-		.sync_sequence = 7,
-		.discovery_nonce = 0xabc,
-		.free_slots = 1,
-		.response_slot_count = 8,
-		.response_slot_us = 500,
-	};
-	struct rb_scheduler_core slave;
-	struct rb_scheduler_config config = {
-		.master = false,
-		.group_id = 41,
-		.master_session = 9,
-		.device_id = 10,
-		.sync_interval_us = 100000,
-		.lease_timeout_us = 100000,
-	};
-	struct rb_radio_event_view event = {
-		.type = RB_EVENT_VIEW_RX_RECEIVED,
-		.address_tick = 1000,
-	};
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	size_t wire_len;
-
-	rb_scheduler_init(&slave, &config);
-	zassert_ok(rb_sync_discovery_encode(&sync, wire, sizeof(wire), &wire_len));
-	event.wire = wire;
-	event.wire_len = wire_len;
-	rb_scheduler_on_radio_event(&slave, &event, 1000);
-	zassert_equal(slave.config.master_session, 9u);
-	zassert_false(slave.slave_hello_pending);
-	zassert_false(slave.slave_assign_rx_pending);
-	zassert_equal(slave.slave_discovery_nonce, 0u);
-}
-
-ZTEST(slave_scheduler, test_failed_hello_retries_after_global_backoff)
-{
-	struct rb_sync_discovery sync = {
-		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 9, 0, 0),
-		.group_id = 41,
-		.sync_sequence = 2,
-		.discovery_nonce = 0xabc,
-		.free_slots = 1,
-		.response_slot_count = 8,
-		.response_slot_us = 500,
-	};
-	struct rb_scheduler_action action;
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	size_t len;
-
-	init_slave();
-	zassert_ok(rb_sync_discovery_encode(&sync, wire, sizeof(wire), &len));
-	deliver(wire, len, 10000u);
-	zassert_ok(rb_scheduler_next_action(&slave, 11000u, &action));
-	zassert_equal(action.type, RB_ACTION_SEND_HELLO);
-	rb_scheduler_action_failed(&slave, &action, 11000u);
-	zassert_equal(rb_scheduler_next_action(&slave, 11999u, &action), -EAGAIN);
-	zassert_ok(rb_scheduler_next_action(&slave, 12000u, &action));
-	zassert_equal(action.type, RB_ACTION_SEND_HELLO);
-}
-
-ZTEST(slave_scheduler, test_failed_assign_rx_retries_full_window)
-{
-	struct rb_scheduler_action action;
-
-	init_slave();
-	slave.slave_assign_rx_pending = true;
-	slave.slave_assign_rx_deadline = 100u;
-	zassert_ok(rb_scheduler_next_action(&slave, 100u, &action));
-	zassert_equal(action.type, RB_ACTION_ENTER_ASSIGN_RX);
-	rb_scheduler_action_failed(&slave, &action, 100u);
-	zassert_false(slave.slave_assign_rx_active);
-	zassert_equal(rb_scheduler_next_action(&slave, 1099u, &action), -EAGAIN);
-	zassert_ok(rb_scheduler_next_action(&slave, 1100u, &action));
-	zassert_equal(action.type, RB_ACTION_ENTER_ASSIGN_RX);
-	zassert_equal(slave.slave_assign_rx_deadline,
-		      1100u + slave.config.assignment_window_us);
-}
-
-ZTEST(slave_scheduler, test_failed_group_rx_retries_profile_action)
-{
-	struct rb_scheduler_action action;
-
-	init_slave();
-	slave.slave_group_rx_pending = true;
-	zassert_ok(rb_scheduler_next_action(&slave, 100u, &action));
-	zassert_equal(action.type, RB_ACTION_ENTER_GROUP_RX);
-	rb_scheduler_action_failed(&slave, &action, 100u);
-	zassert_equal(rb_scheduler_next_action(&slave, 1099u, &action), -EAGAIN);
-	zassert_ok(rb_scheduler_next_action(&slave, 1100u, &action));
-	zassert_equal(action.type, RB_ACTION_ENTER_GROUP_RX);
-}
-
-ZTEST(slave_scheduler, test_failed_ack_queue_retries_same_payload)
-{
-	struct rb_scheduler_action action;
-	const uint8_t expected[] = {0xa5, 0x5a};
-
-	init_slave();
-	slave.slave_ack_pending = true;
-	slave.slave_ack_wire_len = sizeof(expected);
-	memcpy(slave.slave_ack_wire, expected, sizeof(expected));
-	zassert_ok(rb_scheduler_next_action(&slave, 100u, &action));
-	zassert_equal(action.type, RB_ACTION_QUEUE_ACK);
-	rb_scheduler_action_failed(&slave, &action, 100u);
-	zassert_equal(rb_scheduler_next_action(&slave, 1099u, &action), -EAGAIN);
-	zassert_ok(rb_scheduler_next_action(&slave, 1100u, &action));
-	zassert_equal(action.type, RB_ACTION_QUEUE_ACK);
-	zassert_mem_equal(action.wire, expected, sizeof(expected));
-}
-
-ZTEST(slave_scheduler, test_assign_poll_ack_delay)
-{
-	struct rb_sync_discovery sync = {
-		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, 9, 0, 0),
-		.group_id = 41,
-		.sync_sequence = 2,
-		.discovery_nonce = 0xabc,
-		.free_slots = 1,
-		.response_slot_count = 8,
-		.response_slot_us = 500,
-	};
-	struct rb_assign assign = {
-		.common = RB_COMMON_INIT(RB_FRAME_ASSIGN, 9, 0x55aa, 0),
-		.target_device_id = 10,
-		.node_id = 1,
-		.pipe = 1,
-		.downlink_epoch = 4,
-		.uplink_epoch = 8,
-		.max_payload = RB_PACKET_DATA_MAX,
-		.link_window = 64,
-		.retry_count = 3,
-		.lease_timeout_us = 100000,
-	};
 	struct rb_poll poll = {
-		.common = RB_COMMON_INIT(RB_FRAME_POLL, 9, 0x55aa, 0),
-		.uplink_epoch = 8,
-		.next_credit_bytes = 128,
-		.poll_sequence = 3,
+		.common = RB_COMMON_INIT(RB_FRAME_POLL, master_session, 0u),
+		.known_slave_session = known_slave_session,
+		.uplink_ack_sequence = ack_sequence,
+		.next_credit_bytes = RB_ACK_UPLINK_PAYLOAD_MAX,
+		.poll_sequence = 1u,
 	};
+	uint8_t wire[RB_ESB_MAX_PAYLOAD];
+	size_t len;
+
+	zassert_ok(rb_poll_encode(&poll, wire, sizeof(wire), &len));
+	deliver_wire(pipe, wire, len, now_us);
+}
+
+static struct rb_ack_uplink take_ack(bool expected_replace, uint64_t now_us)
+{
 	struct rb_scheduler_action action;
 	struct rb_ack_uplink ack;
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	size_t len;
 
-	init_slave();
-	zassert_ok(rb_sync_discovery_encode(&sync, wire, sizeof(wire), &len));
-	deliver(wire, len, 10000);
-	zassert_ok(rb_assign_encode(&assign, wire, sizeof(wire), &len));
-	deliver(wire, len, 12000);
-	zassert_ok(rb_poll_encode(&poll, wire, sizeof(wire), &len));
-	deliver(wire, len, 13000);
-	zassert_ok(rb_scheduler_next_action(&slave, 13000, &action));
+	zassert_ok(rb_scheduler_next_action(&slave, now_us, &action));
 	zassert_equal(action.type, RB_ACTION_QUEUE_ACK);
-	/* The ACK returned for this poll is the one prepared before this poll. */
+	zassert_equal(action.pipe, 2u);
+	zassert_equal(action.replace_ack, expected_replace);
 	zassert_ok(rb_ack_uplink_decode(action.wire, action.wire_len, &ack));
-	zassert_equal(ack.uplink_sequence, 0u);
+	return ack;
 }
 
-ZTEST(slave_scheduler, test_downlink_gap_delivers_later_frame)
+static void deliver_downlink(uint32_t master_session, uint32_t sequence,
+			     const uint8_t *payload, size_t payload_len,
+			     uint64_t now_us)
 {
-	const uint8_t payload[] = {'b'};
 	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	uint8_t uart;
 	size_t len;
 
+	zassert_ok(rb_downlink_encode(master_session, sequence, payload, payload_len,
+				      wire, sizeof(wire), &len));
+	deliver_wire(0u, wire, len, now_us);
+}
+
+ZTEST(slave_scheduler, test_sync_queues_replacement_ack_on_fixed_pipe)
+{
+	struct rb_ack_uplink ack;
+
 	init_slave();
-	activate_slave(4);
-	zassert_ok(rb_data_encode(RB_FRAME_DOWNLINK_DATA, 7, 0, 4, 2, payload,
-					 sizeof(payload), wire, sizeof(wire), &len));
-	deliver(wire, len, 14000);
-	zassert_equal(rb_scheduler_slave_read_uart(&slave, &uart, sizeof(uart)), 1);
-	zassert_equal(uart, 'b');
-	zassert_equal(slave.downlink_gap_count, 1u);
+	deliver_sync(41u, 9u, 1000u);
+	ack = take_ack(true, 1000u);
+	zassert_equal(ack.common.master_session, 9u);
+	zassert_equal(ack.common.source_node, 2u);
+	zassert_equal(ack.slave_session, 0x12345678u);
+	zassert_equal(ack.payload_len, 0u);
+}
+
+ZTEST(slave_scheduler, test_first_sync_replaces_any_preloaded_data_with_empty_ack)
+{
+	const uint8_t payload[] = {0xa5u, 0x5au};
+	struct rb_ack_uplink ack;
+
+	init_slave();
+	zassert_equal(rb_scheduler_uart_write(&slave, payload, sizeof(payload), 900u),
+		      sizeof(payload));
+	deliver_sync(41u, 9u, 1000u);
+	ack = take_ack(true, 1000u);
+	zassert_equal(ack.uplink_sequence, 0u);
+	zassert_equal(ack.payload_len, 0u);
+	zassert_equal(slave.slave_uplink_count, sizeof(payload));
+}
+
+ZTEST(slave_scheduler, test_group_mismatch_changes_no_session_or_ack_state)
+{
+	struct rb_scheduler_action action;
+
+	init_slave();
+	deliver_sync(42u, 9u, 1000u);
+	zassert_equal(rb_scheduler_session(&slave), 1u);
+	zassert_equal(rb_scheduler_next_action(&slave, 1000u, &action), -EAGAIN);
+}
+
+ZTEST(slave_scheduler, test_poll_marks_link_active_and_queues_next_ack)
+{
+	init_slave();
+	deliver_sync(41u, 9u, 1000u);
+	(void)take_ack(true, 1000u);
+	deliver_poll(2u, 9u, 0u, 0u, 2000u);
+	zassert_true(slave.slave_active);
+	(void)take_ack(false, 2000u);
+}
+
+ZTEST(slave_scheduler, test_uplink_repeats_until_session_and_sequence_are_acked)
+{
+	const uint8_t payload[] = {0xa5u, 0x5au};
+	struct rb_ack_uplink first;
+	struct rb_ack_uplink repeated;
+
+	init_slave();
+	deliver_sync(41u, 9u, 1000u);
+	(void)take_ack(true, 1000u);
+	zassert_equal(rb_scheduler_uart_write(&slave, payload, sizeof(payload), 1100u),
+		      sizeof(payload));
+	deliver_poll(2u, 9u, 0u, 0u, 1200u);
+	first = take_ack(false, 1200u);
+	zassert_not_equal(first.uplink_sequence, 0u);
+	zassert_mem_equal(first.payload, payload, sizeof(payload));
+	deliver_poll(2u, 9u, 0x99999999u, first.uplink_sequence, 1300u);
+	repeated = take_ack(false, 1300u);
+	zassert_equal(repeated.uplink_sequence, first.uplink_sequence);
+	deliver_poll(2u, 9u, 0x12345678u, first.uplink_sequence, 1400u);
+	repeated = take_ack(false, 1400u);
+	zassert_equal(repeated.uplink_sequence, 0u);
+	zassert_equal(repeated.payload_len, 0u);
+}
+
+ZTEST(slave_scheduler, test_lease_expiry_retains_queued_uart_data)
+{
+	const uint8_t payload[] = {1u, 2u, 3u};
+	struct rb_scheduler_action action;
+
+	init_slave();
+	deliver_sync(41u, 9u, 1000u);
+	(void)take_ack(true, 1000u);
+	zassert_equal(rb_scheduler_uart_write(&slave, payload, sizeof(payload), 1100u),
+		      sizeof(payload));
+	deliver_poll(2u, 9u, 0u, 0u, 1200u);
+	(void)take_ack(false, 1200u);
+	zassert_equal(rb_scheduler_next_action(&slave, 101200u, &action), -EAGAIN);
+	zassert_false(slave.slave_active);
+	zassert_equal(slave.slave_uplink_count, sizeof(payload));
+}
+
+ZTEST(slave_scheduler, test_downlink_gap_delivers_later_record)
+{
+	uint8_t output[2];
+
+	init_slave();
+	deliver_sync(41u, 9u, 1000u);
+	(void)take_ack(true, 1000u);
+	deliver_downlink(9u, 1u, (const uint8_t *)"a", 1u, 1100u);
+	deliver_downlink(9u, 3u, (const uint8_t *)"c", 1u, 1200u);
+	zassert_equal(rb_scheduler_slave_read_uart(&slave, output, sizeof(output)), 2u);
+	zassert_mem_equal(output, "ac", 2u);
+	zassert_equal(rb_scheduler_downlink_gap_count(&slave), 1u);
 }
 
 ZTEST(slave_scheduler, test_downlink_duplicate_is_not_delivered_twice)
 {
-	const uint8_t payload[] = {'a'};
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	uint8_t uart;
-	size_t len;
+	uint8_t output;
 
 	init_slave();
-	activate_slave(4);
-	zassert_ok(rb_data_encode(RB_FRAME_DOWNLINK_DATA, 7, 0, 4, 1, payload,
-					 sizeof(payload), wire, sizeof(wire), &len));
-	deliver(wire, len, 14000);
-	zassert_equal(rb_scheduler_slave_read_uart(&slave, &uart, sizeof(uart)), 1);
-	deliver(wire, len, 15000);
-	zassert_equal(rb_scheduler_slave_read_uart(&slave, &uart, sizeof(uart)), 0);
-	zassert_equal(slave.downlink_duplicate_count, 1u);
+	deliver_sync(41u, 9u, 1000u);
+	(void)take_ack(true, 1000u);
+	deliver_downlink(9u, 1u, (const uint8_t *)"a", 1u, 1100u);
+	deliver_downlink(9u, 1u, (const uint8_t *)"a", 1u, 1200u);
+	zassert_equal(rb_scheduler_slave_read_uart(&slave, &output, 1u), 1u);
+	zassert_equal(rb_scheduler_slave_read_uart(&slave, &output, 1u), 0u);
+	zassert_equal(rb_scheduler_downlink_duplicate_count(&slave), 1u);
 }
 
-ZTEST(slave_scheduler, test_uplink_repeats_until_master_acknowledges_sequence)
+ZTEST(slave_scheduler, test_wrong_poll_pipe_and_session_are_rejected)
 {
-	struct rb_assign assign = {
-		.common = RB_COMMON_INIT(RB_FRAME_ASSIGN, 7, 0x55aa, 0),
-		.target_device_id = 10,
-		.node_id = 1,
-		.pipe = 1,
-		.downlink_epoch = 4,
-		.uplink_epoch = 8,
-		.max_payload = RB_PACKET_DATA_MAX,
-		.link_window = 64,
-		.retry_count = 3,
-		.lease_timeout_us = 100000,
-	};
-	struct rb_poll poll = {
-		.common = RB_COMMON_INIT(RB_FRAME_POLL, 7, 0x55aa, 0),
-		.uplink_epoch = 8,
-		.next_credit_bytes = 128,
-		.poll_sequence = 1,
-	};
-	const uint8_t payload[] = {0xa5, 0x5a};
-	struct rb_scheduler_action action;
-	struct rb_ack_uplink ack;
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	size_t len;
-
 	init_slave();
-	zassert_ok(rb_assign_encode(&assign, wire, sizeof(wire), &len));
-	deliver(wire, len, 1000);
-	zassert_equal(rb_scheduler_uart_write(&slave, payload, sizeof(payload), 1001),
-		      sizeof(payload));
-	zassert_ok(rb_poll_encode(&poll, wire, sizeof(wire), &len));
-	deliver(wire, len, 2000);
-	zassert_ok(rb_scheduler_next_action(&slave, 2000, &action));
-	zassert_ok(rb_ack_uplink_decode(action.wire, action.wire_len, &ack));
-	zassert_equal(ack.uplink_sequence, 1u);
-	zassert_mem_equal(ack.payload, payload, sizeof(payload));
-
-	poll.poll_sequence++;
-	zassert_ok(rb_poll_encode(&poll, wire, sizeof(wire), &len));
-	deliver(wire, len, 3000);
-	zassert_ok(rb_scheduler_next_action(&slave, 3000, &action));
-	zassert_ok(rb_ack_uplink_decode(action.wire, action.wire_len, &ack));
-	zassert_equal(ack.uplink_sequence, 1u);
-	zassert_equal(ack.payload_len, sizeof(payload));
-	zassert_mem_equal(ack.payload, payload, sizeof(payload));
-
-	poll.poll_sequence++;
-	poll.uplink_ack_base = 1u;
-	zassert_ok(rb_poll_encode(&poll, wire, sizeof(wire), &len));
-	deliver(wire, len, 4000);
-	zassert_ok(rb_scheduler_next_action(&slave, 4000, &action));
-	zassert_ok(rb_ack_uplink_decode(action.wire, action.wire_len, &ack));
-	zassert_equal(ack.uplink_sequence, 0u);
-	zassert_equal(ack.payload_len, 0u);
-}
-
-ZTEST(slave_scheduler, test_uplink_splits_at_ack_payload_capacity)
-{
-	struct rb_assign assign = {
-		.common = RB_COMMON_INIT(RB_FRAME_ASSIGN, 7, 0x55aa, 0),
-		.target_device_id = 10,
-		.node_id = 1,
-		.pipe = 1,
-		.downlink_epoch = 4,
-		.uplink_epoch = 8,
-		.max_payload = RB_PACKET_DATA_MAX,
-		.link_window = 64,
-		.retry_count = 3,
-		.lease_timeout_us = 100000,
-	};
-	struct rb_poll poll = {
-		.common = RB_COMMON_INIT(RB_FRAME_POLL, 7, 0x55aa, 0),
-		.uplink_epoch = 8,
-		.next_credit_bytes = RB_PACKET_DATA_MAX,
-		.poll_sequence = 1,
-	};
-	uint8_t payload[RB_PACKET_DATA_MAX];
-	struct rb_scheduler_action action;
-	struct rb_ack_uplink ack;
-	uint8_t wire[RB_ESB_MAX_PAYLOAD];
-	size_t len;
-
-	for (size_t i = 0; i < sizeof(payload); i++) {
-		payload[i] = (uint8_t)i;
-	}
-	init_slave();
-	zassert_ok(rb_assign_encode(&assign, wire, sizeof(wire), &len));
-	deliver(wire, len, 1000);
-	zassert_equal(rb_scheduler_uart_write(&slave, payload, sizeof(payload), 1001),
-		      sizeof(payload));
-	zassert_ok(rb_poll_encode(&poll, wire, sizeof(wire), &len));
-	deliver(wire, len, 2000);
-	zassert_ok(rb_scheduler_next_action(&slave, 2000, &action));
-	zassert_ok(rb_ack_uplink_decode(action.wire, action.wire_len, &ack));
-	zassert_equal(ack.payload_len,
-		      RB_ESB_MAX_PAYLOAD - RB_ACK_UPLINK_HEADER_SIZE);
-	zassert_mem_equal(ack.payload, payload, ack.payload_len);
-
-	poll.poll_sequence++;
-	poll.uplink_ack_base = ack.uplink_sequence;
-	zassert_ok(rb_poll_encode(&poll, wire, sizeof(wire), &len));
-	deliver(wire, len, 3000);
-	zassert_ok(rb_scheduler_next_action(&slave, 3000, &action));
-	zassert_ok(rb_ack_uplink_decode(action.wire, action.wire_len, &ack));
-	zassert_equal(ack.payload_len,
-		      sizeof(payload) - (RB_ESB_MAX_PAYLOAD -
-					 RB_ACK_UPLINK_HEADER_SIZE));
-	zassert_mem_equal(ack.payload,
-			  payload + RB_ESB_MAX_PAYLOAD - RB_ACK_UPLINK_HEADER_SIZE,
-			  ack.payload_len);
-}
-
-ZTEST(slave_scheduler, test_uart_available_tracks_uplink_queue_capacity)
-{
-	const uint8_t payload[] = {1u, 2u, 3u, 4u};
-
-	init_slave();
-	zassert_equal(rb_scheduler_uart_available(&slave),
-		      RB_SCHEDULER_UART_QUEUE_SIZE);
-	zassert_equal(rb_scheduler_uart_write(&slave, payload, sizeof(payload), 1u),
-		      sizeof(payload));
-	zassert_equal(rb_scheduler_uart_available(&slave),
-		      RB_SCHEDULER_UART_QUEUE_SIZE - sizeof(payload));
+	deliver_sync(41u, 9u, 1000u);
+	(void)take_ack(true, 1000u);
+	deliver_poll(1u, 9u, 0u, 0u, 1100u);
+	deliver_poll(2u, 8u, 0u, 0u, 1200u);
+	zassert_false(slave.slave_active);
+	zassert_equal(rb_scheduler_invalid_node_count(&slave), 1u);
+	zassert_equal(rb_scheduler_invalid_session_count(&slave), 1u);
 }
 
 ZTEST_SUITE(slave_scheduler, NULL, NULL, NULL, NULL, NULL);

@@ -22,12 +22,12 @@ struct rb_bridge_stats {
 	uint64_t downlink_gap_packets;
 	uint64_t downlink_duplicate_packets;
 	uint64_t invalid_session_packets;
+	uint64_t invalid_node_packets;
 	uint64_t invalid_group_packets;
 	uint64_t queue_drop_bytes;
 	uint64_t node_record_count[RB_MAX_SOURCE_NODE];
 	uint64_t node_record_bytes[RB_MAX_SOURCE_NODE];
 	uint64_t node_record_drop[RB_MAX_SOURCE_NODE];
-	uint64_t discovery_hello_count;
 	uint64_t sync_rx_count;
 	uint64_t sync_missed_count;
 	uint64_t sync_pair_count;
@@ -50,6 +50,10 @@ struct rb_bridge_stats {
 	uint64_t action_error_count;
 	int64_t utc_seconds;
 	int64_t sync_offset;
+	int64_t node1_ack_age_us;
+	int64_t node2_ack_age_us;
+	int64_t node3_ack_age_us;
+	uint32_t radio_event_drop_count;
 	uint32_t sync_age_us;
 	uint32_t sync_jitter;
 	uint32_t sync_last_sequence;
@@ -57,8 +61,12 @@ struct rb_bridge_stats {
 	int32_t sync_last_error;
 	int32_t sync_last_pps_reset_error;
 	int32_t last_action_error;
+	uint32_t node1_poll_failures;
+	uint32_t node2_poll_failures;
+	uint32_t node3_poll_failures;
+	uint32_t slave_session;
 	uint8_t active_count;
-	uint8_t suspect_count;
+	uint8_t active_mask;
 	uint8_t sync_state;
 	uint8_t slave_active;
 	uint8_t slave_node_id;
@@ -92,8 +100,12 @@ int32_t bridge_runtime_sync_drift_ppm(void);
 
 #if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
 int bridge_runtime_validation_inject(size_t len, uint8_t seed);
+int bridge_runtime_validation_inject_uart(size_t len, uint8_t seed);
 int bridge_runtime_validation_verify(size_t len, uint8_t seed,
 				     size_t *mismatch_offset);
+int bridge_runtime_validation_verify_pair(size_t first_len, uint8_t first_seed,
+					  size_t second_len,
+					  uint8_t second_seed);
 size_t bridge_runtime_validation_copy(size_t offset, uint8_t *data,
 				      size_t max_len);
 void bridge_runtime_validation_clear(void);

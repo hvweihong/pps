@@ -23,18 +23,16 @@ void wireless_time_sync_init(struct rb_wireless_time_sync *sync,
 
 int wireless_time_sync_master_build(struct rb_wireless_time_sync *sync,
 				    uint64_t next_pps_tick,
-				    struct rb_sync_discovery *frame)
+				    struct rb_sync_frame *frame)
 {
 	if (sync == NULL || frame == NULL || sync->session == 0u) {
 		return -EINVAL;
 	}
-	*frame = (struct rb_sync_discovery){
-		.common = RB_COMMON_INIT(RB_FRAME_SYNC_DISCOVERY, sync->session, 0, 0),
+	*frame = (struct rb_sync_frame){
+		.common = RB_COMMON_INIT(RB_FRAME_SYNC, sync->session, 0u),
 		.sync_sequence = sync->next_sequence,
 		.next_pps_master_tick = next_pps_tick,
 		.sync_interval_us = sync->sync_interval_us,
-		.response_slot_count = 8,
-		.response_slot_us = 500,
 	};
 	if (sync->tracker.local_valid) {
 		frame->previous_master_address_tick = sync->tracker.local_address_tick;
@@ -56,7 +54,7 @@ void wireless_time_sync_master_tx_captured(struct rb_wireless_time_sync *sync,
 }
 
 int wireless_time_sync_slave_receive(struct rb_wireless_time_sync *sync,
-				     const struct rb_sync_discovery *frame,
+				     const struct rb_sync_frame *frame,
 				     uint64_t local_address_tick,
 				     struct sync_observation *observation)
 {

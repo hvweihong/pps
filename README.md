@@ -96,11 +96,17 @@ param set role_id 1
 param set group_id 1
 param set group_key 00112233445566778899aabbccddeeff
 kernel reboot cold
+
+# 第二个 slave；固定节点 ID 为 2
+param set role_id 2
+param set group_id 1
+param set group_key 00112233445566778899aabbccddeeff
+kernel reboot cold
 ```
 
 修改单个参数可用 `param clear <name>` 恢复编译默认值；`param reset` 清除全部 8 项。
 
-### 双板端到端验证
+### 双板/三板端到端验证
 
 以下命令会按固定 USB ID 刷写两块板，自动配置角色，并验证无线锁定、CDC 模拟 UART
 bridge 双向数据、队列/驱动错误计数与证据落盘。
@@ -114,9 +120,27 @@ bridge 双向数据、队列/驱动错误计数与证据落盘。
   --cycles 1 --bridge-length 600
 ```
 
-每次运行在 `build/board-e2e/<timestamp>-<stage>/` 保存两板原始日志和
-`summary.json`。普通 shell command timeout 最多只自动重刷受影响的精确 USB ID 一次；
-再次超时立即失败，不会无限恢复。
+增加第二个 slave 后，runner 会自动配置固定角色 0/1/2，验证 master 广播同时到达两个
+slave、两个 slave 独立上行、完整 record 不交织、逐板重启恢复和 30 秒稳态：
+
+```bash
+/home/hv/ncs/.venv/bin/python tools/board_e2e.py \
+  --stage one-master-two-slaves \
+  --master-id DBE5C3D84EA2EC6F --slave-id 5B3D71D27A709CA2 \
+  --slave2-id DD01F9DF462D68A5 \
+  --master-uf2 build/validation/zephyr/zephyr.uf2 \
+  --slave-uf2 build/validation/zephyr/zephyr.uf2 \
+  --slave2-uf2 build/validation/zephyr/zephyr.uf2 \
+  --cycles 1 --bridge-length 600 \
+  --cold-reboots-per-board 1 --watchdog-restarts-per-board 1 \
+  --steady-state-seconds 30
+```
+
+每次运行在 `build/board-e2e/<timestamp>-<stage>/` 保存每块板的独立原始日志和
+`summary.json`；三板模式生成 `master.raw.log`、`slave1.raw.log`、`slave2.raw.log`。
+摘要保存各方向的原始延时样本及 min/median/p95/max，重启记录包含板名、类型和恢复耗时。
+普通 shell command timeout 每块板最多自动重刷自身精确 USB ID 一次；再次超时立即失败，
+不会重置其他板或无限恢复。
 
 开发回归包括 5 个 native suite 和 host runner 测试：
 
@@ -149,8 +173,8 @@ host UART <-> master board                 slave board <-> host UART
   后续数据。
 - slave 上行由 master 轮询并确认；未确认记录会重发。master 为每个 slave 保留独立完整
   record queue，再按轮询顺序输出到 UART，避免不同 slave 的字节流被合并。
-- slave 之间没有直接业务收发路径。协议支持最多 3 个活动 slave；当前板级回归使用一块
-  master 和一块 slave，多 slave 调度由 native 测试覆盖。
+- slave 之间没有直接业务收发路径。协议支持最多 3 个活动 slave；自动化 runner 支持一块
+  master 加一块或两块 slave，第三个 slave 的容量边界仍需后续实测。
 - 生产路径使用物理 UART。validation 固件把相同 bridge 边界扩展到 CDC，以便电脑未连接
   外部串口时仍能验证完整无线链路。
 
@@ -187,13 +211,13 @@ slave 从连续无线同步帧估计 master/slave offset，校正本地 PPS epoc
 | --- | --- |
 | `src/app/` | 启动、watchdog/boot guard、状态日志、LED |
 | `src/config/` | 编译默认值、8 项 NVS 参数、CDC shell |
-| `src/bridge/` | wire protocol、ring/record、membership、scheduler、UART bridge 集成 |
+| `src/bridge/` | wire protocol、ring/record、固定节点表、scheduler、UART bridge 集成 |
 | `src/radio/` | RF 地址派生、AES 辅助与 ESB transport |
 | `src/time/` | timebase、PPS、无线同步、NMEA、UTC 状态机 |
 | `src/validation/` | validation-only CDC bridge/time 注入与校验 |
 | `tests/unit/` | bridge/config/radio/time/time-UART 设计型 native 测试 |
 | `tests/host/` | 固定 ID 烧录、自动恢复、证据与 runner 测试 |
-| `tools/` | UF2 烧录与双板 E2E 工具 |
+| `tools/` | UF2 烧录与双板/三板 E2E 工具 |
 
 ### 验证边界
 
@@ -207,4 +231,4 @@ production 固件不编译 CDC payload/time 注入或丢包注入；validation o
 - 用真实 GNSS NMEA + PPS 驯服 external master，并验证丢失输入后的 holdover；
 - 用示波器确认 master/slave PPS 都为 1 Hz、100 ms 高电平；
 - 在 external locked 状态测量两板 PPS 上升沿相位误差并确认不超过 20 us；
-- 使用三块真实 slave 做并发吞吐与独立 record 压力测试。
+- 接入第三个 slave（role 3），验证三 slave 容量、并发吞吐与独立 record 压力。

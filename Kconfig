@@ -32,24 +32,9 @@ config RADIO_BRIDGE_AGGREGATION_TIMEOUT_US
 	range 100 10000
 
 config RADIO_BRIDGE_SYNC_INTERVAL_US
-	int "Wireless sync/discovery interval"
+	int "Wireless synchronization interval"
 	default 100000
 	range 10000 1000000
-
-config RADIO_BRIDGE_RESPONSE_SLOT_COUNT
-	int "Discovery response slots"
-	default 8
-	range 1 32
-
-config RADIO_BRIDGE_RESPONSE_SLOT_US
-	int "Discovery response slot width"
-	default 500
-	range 100 5000
-
-config RADIO_BRIDGE_ASSIGNMENT_WINDOW_US
-	int "Assignment receive window"
-	default 6000
-	range 1000 50000
 
 config RADIO_BRIDGE_LEASE_TIMEOUT_US
 	int "Lease timeout without a valid poll"
@@ -73,8 +58,8 @@ config TIME_SYNC_RADIO_DELAY_US
 
 config TIME_SYNC_STATUS_INTERVAL_MS
 	int "Status log interval"
-	default 1000
-	range 100 10000
+	default 10000
+	range 1000 60000
 
 config TIME_SYNC_LED_HEARTBEAT
 	bool "Blink board LED"

@@ -78,12 +78,7 @@ struct rb_radio_retained_diag {
 
 enum rb_radio_profile {
 	RB_RADIO_MASTER_PTX,
-	RB_RADIO_MASTER_DISCOVERY_PRX,
-	RB_RADIO_MASTER_ASSIGN_PTX,
-	RB_RADIO_SLAVE_GROUP_PRX,
-	RB_RADIO_SLAVE_HELLO_PTX,
-	RB_RADIO_SLAVE_ASSIGN_PRX,
-	RB_RADIO_SLAVE_ACTIVE_PRX,
+	RB_RADIO_SLAVE_PRX,
 };
 
 enum rb_radio_event_type {
@@ -94,6 +89,7 @@ enum rb_radio_event_type {
 
 struct rb_radio_transport_config {
 	bool master;
+	uint8_t node_id;
 	uint32_t group_id;
 	struct rb_radio_addresses addresses;
 };
@@ -108,13 +104,12 @@ struct rb_radio_event {
 };
 
 int radio_transport_init(const struct rb_radio_transport_config *config);
-int radio_transport_set_profile(enum rb_radio_profile profile,
-				uint8_t node_id,
-				const uint8_t temporary_address[5]);
 int radio_transport_send(uint8_t pipe, bool no_ack,
 				const uint8_t *data, size_t len);
 int radio_transport_queue_ack(uint8_t pipe, const uint8_t *data, size_t len);
+int radio_transport_replace_ack(uint8_t pipe, const uint8_t *data, size_t len);
 int radio_transport_get_event(struct rb_radio_event *event, k_timeout_t timeout);
+uint32_t radio_transport_event_drop_count(void);
 bool radio_transport_retained_diag_get(struct rb_radio_retained_diag *diag);
 void radio_transport_retained_diag_clear(void);
 void radio_transport_retained_diag_note(enum rb_radio_boot_stage stage,

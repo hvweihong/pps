@@ -5,12 +5,15 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(config_tests)
 
 target_include_directories(app PRIVATE
+	../../../src/app
 	../../../src/config
 	../../../src/bridge
 )
 target_sources(app PRIVATE
+	src/test_boot_recovery.c
 	src/test_config.c
 	src/test_param_config.c
+	../../../src/app/boot_recovery.c
 	../../../src/config/bridge_config.c
 	../../../src/config/param_config.c
 )

@@ -182,6 +182,33 @@ class ShellOutputTests(unittest.TestCase):
             )
         )
 
+    def test_three_board_readiness_requires_mask_count_and_every_slave_locked(self):
+        board_e2e = load_board_e2e()
+        current_group_ready = require_symbol(board_e2e, "_current_group_ready")
+        master = "bridge_link active_count=2 active_mask=0x03"
+
+        self.assertTrue(
+            current_group_ready(
+                master,
+                ["State:           LOCKED", "bridge_sync sync_state=2"],
+                expected_mask=0x03,
+            )
+        )
+        self.assertFalse(
+            current_group_ready(
+                "bridge_link active_count=1 active_mask=0x01",
+                ["State:           LOCKED", "State:           LOCKED"],
+                expected_mask=0x03,
+            )
+        )
+        self.assertFalse(
+            current_group_ready(
+                master,
+                ["State:           LOCKED", "State:           ACQUIRING"],
+                expected_mask=0x03,
+            )
+        )
+
     def test_readiness_uses_latest_values_in_fresh_samples(self):
         board_e2e = load_board_e2e()
         current_pair_ready = require_symbol(board_e2e, "_current_pair_ready")
@@ -218,7 +245,7 @@ class ShellOutputTests(unittest.TestCase):
         require_runtime_zero = require_symbol(board_e2e, "_require_runtime_zero_drops")
         require_runtime_zero(
             "bridge_status uart_rx_drop_bytes=0 uart_tx_drop_bytes=0\r\n"
-            "bridge_link queue_drop_bytes=0\r\n",
+            "bridge_link queue_drop_bytes=0 radio_event_drop_count=0\r\n",
             "master",
         )
 
@@ -229,17 +256,20 @@ class ShellOutputTests(unittest.TestCase):
             "uart_rx_drop_bytes",
             "uart_tx_drop_bytes",
             "queue_drop_bytes",
+            "radio_event_drop_count",
         ):
             values = {
                 "uart_rx_drop_bytes": 0,
                 "uart_tx_drop_bytes": 0,
                 "queue_drop_bytes": 0,
+                "radio_event_drop_count": 0,
             }
             values[field] = 1
             output = (
                 f"bridge_status uart_rx_drop_bytes={values['uart_rx_drop_bytes']} "
                 f"uart_tx_drop_bytes={values['uart_tx_drop_bytes']}\r\n"
-                f"bridge_link queue_drop_bytes={values['queue_drop_bytes']}\r\n"
+                f"bridge_link queue_drop_bytes={values['queue_drop_bytes']} "
+                f"radio_event_drop_count={values['radio_event_drop_count']}\r\n"
             )
             with self.subTest(field=field), self.assertRaises(board_e2e.GateError):
                 require_runtime_zero(output, "slave")
@@ -251,6 +281,7 @@ class ShellOutputTests(unittest.TestCase):
             "uart_rx_drop_bytes=0",
             "uart_tx_drop_bytes=0",
             "queue_drop_bytes=0",
+            "radio_event_drop_count=0",
         )
         for missing in fields:
             output = " ".join(field for field in fields if field != missing)
@@ -314,8 +345,10 @@ class RuntimeFreshnessTests(unittest.TestCase):
 
             def __init__(self):
                 self.history = bytearray(
-                    b"uart_rx_drop_bytes=4 uart_tx_drop_bytes=5 queue_drop_bytes=6"
+                    b"uart_rx_drop_bytes=4 uart_tx_drop_bytes=5 queue_drop_bytes=6 "
+                    b"radio_event_drop_count=7"
                 )
+                self.commands = []
                 self.events = []
 
             def history_bytes(self):
@@ -328,19 +361,25 @@ class RuntimeFreshnessTests(unittest.TestCase):
                 return bytes(self.history[mark:])
 
             def command(self, command):
-                self.history.extend(
-                    b" uart_rx_drop_bytes=0 uart_tx_drop_bytes=0 queue_drop_bytes=0"
+                self.commands.append(command)
+                return (
+                    "bridge_test stats uart_rx_drop_bytes=0 "
+                    "uart_tx_drop_bytes=0 queue_drop_bytes=0 "
+                    "radio_event_drop_count=0"
                 )
-                return "Uptime: 10 ms"
 
             def event(self, message):
                 self.events.append(message)
 
         board = FakeBoard()
         wait_for_fresh(board)
+        self.assertEqual(board.commands, ["bridge_test stats"])
         self.assertEqual(
             board.events,
-            ["runtime queue drops PASS uart_rx=0 uart_tx=0 bridge_queue=0"],
+            [
+                "runtime queue drops PASS uart_rx=0 uart_tx=0 "
+                "bridge_queue=0 radio_event=0"
+            ],
         )
 
     def test_fresh_runtime_check_ignores_stale_zero_counters(self):
@@ -353,7 +392,8 @@ class RuntimeFreshnessTests(unittest.TestCase):
 
             def __init__(self):
                 self.history = bytearray(
-                    b"uart_rx_drop_bytes=0 uart_tx_drop_bytes=0 queue_drop_bytes=0"
+                    b"uart_rx_drop_bytes=0 uart_tx_drop_bytes=0 queue_drop_bytes=0 "
+                    b"radio_event_drop_count=0"
                 )
 
             def history_bytes(self):
@@ -366,16 +406,81 @@ class RuntimeFreshnessTests(unittest.TestCase):
                 return bytes(self.history[mark:])
 
             def command(self, command):
-                self.history.extend(
-                    b" uart_rx_drop_bytes=0 uart_tx_drop_bytes=1 queue_drop_bytes=0"
+                return (
+                    "bridge_test stats uart_rx_drop_bytes=0 "
+                    "uart_tx_drop_bytes=1 queue_drop_bytes=0 "
+                    "radio_event_drop_count=0"
                 )
-                return "Uptime: 10 ms"
 
             def event(self, message):
                 pass
 
         with self.assertRaises(board_e2e.GateError):
             wait_for_fresh(FakeBoard())
+
+
+class BestEffortBroadcastGateTests(unittest.TestCase):
+    def test_retries_a_fresh_broadcast_after_one_slave_misses(self):
+        board_e2e = load_board_e2e()
+        run_gate = require_symbol(board_e2e, "_run_best_effort_broadcast_gate")
+
+        class FakeBoard:
+            command_timeout = 0.01
+
+            def __init__(self, label, verify_results):
+                self.label = label
+                self.verify_results = iter(verify_results)
+                self.commands = []
+                self.events = []
+
+            def command(self, command):
+                self.commands.append(command)
+                if command.startswith("bridge_test verify"):
+                    return next(self.verify_results)
+                if command == "bridge_test clear":
+                    return "bridge_test clear ok"
+                _, _, length, seed = command.split()
+                return f"bridge_test inject_uart ok len={length} seed={seed}"
+
+            def event(self, message):
+                self.events.append(message)
+
+        master = FakeBoard("master", [])
+        slave1 = FakeBoard(
+            "slave1",
+            [
+                "bridge_test verify pending need=32 available=0",
+                "bridge_test verify ok len=32 seed=24",
+            ],
+        )
+        slave2 = FakeBoard(
+            "slave2",
+            [
+                "bridge_test verify ok len=32 seed=23",
+                "bridge_test verify ok len=32 seed=24",
+            ],
+        )
+
+        latency = run_gate(
+            master,
+            [slave1, slave2],
+            32,
+            23,
+            "matrix-master-broadcast-32",
+        )
+
+        self.assertEqual(
+            [command for command in master.commands if "inject_uart" in command],
+            [
+                "bridge_test inject_uart 32 23",
+                "bridge_test inject_uart 32 24",
+            ],
+        )
+        self.assertEqual(master.commands.count("bridge_test clear"), 2)
+        self.assertEqual(slave1.commands.count("bridge_test clear"), 2)
+        self.assertEqual(slave2.commands.count("bridge_test clear"), 2)
+        self.assertEqual(set(latency), {"slave1", "slave2"})
+        self.assertTrue(any("retry" in event for event in master.events))
 
 
 class BootGuardClearTests(unittest.TestCase):
@@ -443,6 +548,7 @@ class TimeUartFreshnessTests(unittest.TestCase):
                 self.history = bytearray(
                     b"time_uart rx_restart_errors=1 rx_buffer_errors=2"
                 )
+                self.commands = []
                 self.events = []
 
             def history_mark(self):
@@ -452,13 +558,14 @@ class TimeUartFreshnessTests(unittest.TestCase):
                 return bytes(self.history[mark:])
 
             def command(self, command):
-                self.history.extend(
-                    b" time_uart rx_drop_bytes=0 overlong_line_drops=0 "
-                    b"output_line_drops=0 rx_restart_errors=0 rx_buffer_errors=0 "
-                    b"rx_stopped_events=0 rx_stop_reason_mask=0 "
-                    b"pps_input_drop_count=0"
+                self.commands.append(command)
+                return (
+                    "bridge_test time_uart rx_drop_bytes=0 "
+                    "overlong_line_drops=0 output_line_drops=0 "
+                    "rx_restart_errors=0 rx_buffer_errors=0 "
+                    "rx_stopped_events=0 rx_stop_reason_mask=0 "
+                    "pps_input_drop_count=0"
                 )
-                return "Uptime: 10 ms"
 
             def event(self, message):
                 self.events.append(message)
@@ -466,6 +573,7 @@ class TimeUartFreshnessTests(unittest.TestCase):
         board = FakeBoard()
         wait_for_fresh(board)
 
+        self.assertEqual(board.commands, ["bridge_test stats"])
         self.assertEqual(
             board.events,
             ["time UART input errors and drops PASS"],
@@ -488,18 +596,13 @@ class TimeUartFreshnessTests(unittest.TestCase):
                 return b"time_uart rx_restart_errors=0 rx_buffer_errors=0"
 
             def command(self, command):
-                return "Uptime: 10 ms"
+                return "bridge_test time_uart rx_restart_errors=0 rx_buffer_errors=0"
 
             def event(self, message):
                 pass
 
-        with (
-            mock.patch.object(board_e2e, "STATUS_TIMEOUT_S", 1.0),
-            mock.patch.object(board_e2e.time, "monotonic", side_effect=[0.0, 0.0, 2.0]),
-            mock.patch.object(board_e2e.time, "sleep"),
-        ):
-            with self.assertRaises(board_e2e.GateError):
-                wait_for_fresh(FakeBoard())
+        with self.assertRaises(board_e2e.GateError):
+            wait_for_fresh(FakeBoard())
 
     def test_time_uart_check_rejects_each_nonzero_input_error_or_drop(self):
         board_e2e = load_board_e2e()
@@ -552,7 +655,7 @@ class TimeUartFreshnessTests(unittest.TestCase):
                         return status.encode()
 
                     def command(self, command):
-                        return "Uptime: 10 ms"
+                        return status
 
                     def event(self, message):
                         pass
@@ -672,3 +775,74 @@ class RoleManagementTests(unittest.TestCase):
         )
         self.assertEqual(board.reboot_count, 1)
         self.assertEqual(board.events, ["role_id=0 state=changed-and-rebooted"])
+
+
+class WatchdogTriggerTests(unittest.TestCase):
+    def test_require_waits_for_delayed_retained_watchdog_diagnostic(self):
+        board_e2e = load_board_e2e()
+        board = board_e2e.BoardSession(
+            "slave1",
+            "5B3D71D27A709CA2",
+            Path("firmware.uf2"),
+            1.0,
+            mock.Mock(),
+        )
+        mark = board.history_mark()
+
+        def receive_delayed_diagnostic(duration):
+            self.assertEqual(duration, 0.1)
+            board._remember(b"watchdog reset recovered: reset_reason=0x2\r\n")
+
+        with (
+            mock.patch.object(board, "_drain", side_effect=receive_delayed_diagnostic),
+            mock.patch.object(board, "event") as event,
+        ):
+            board.require_watchdog_recovery(mark)
+
+        event.assert_called_once_with("watchdog reset retained diagnostic PASS")
+
+    def test_trigger_reconnects_and_requires_retained_watchdog_diagnostic(self):
+        board_e2e = load_board_e2e()
+        board = board_e2e.BoardSession(
+            "slave1",
+            "5B3D71D27A709CA2",
+            Path("firmware.uf2"),
+            1.0,
+            mock.Mock(),
+        )
+
+        def reconnect_with_diagnostic(**unused):
+            board._remember(b"watchdog reset recovered: reset_reason=0x2\r\n")
+
+        with (
+            mock.patch.object(board, "_drain"),
+            mock.patch.object(board, "_write") as write,
+            mock.patch.object(board, "close") as close,
+            mock.patch.object(board, "connect", side_effect=reconnect_with_diagnostic),
+            mock.patch.object(board, "event") as event,
+            mock.patch.object(board_e2e.time, "sleep"),
+        ):
+            board.trigger_watchdog()
+
+        write.assert_called_once_with(b"boot_test watchdog\r")
+        close.assert_called_once_with()
+        event.assert_any_call("watchdog reset retained diagnostic PASS")
+
+    def test_trigger_fails_if_retained_watchdog_diagnostic_is_missing(self):
+        board_e2e = load_board_e2e()
+        board = board_e2e.BoardSession(
+            "slave1",
+            "5B3D71D27A709CA2",
+            Path("firmware.uf2"),
+            1.0,
+            mock.Mock(),
+        )
+        with (
+            mock.patch.object(board, "_drain"),
+            mock.patch.object(board, "_write"),
+            mock.patch.object(board, "close"),
+            mock.patch.object(board, "connect"),
+            mock.patch.object(board_e2e.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(board_e2e.GateError, "watchdog diagnostic"):
+                board.trigger_watchdog()

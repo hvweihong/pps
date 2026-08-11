@@ -25,8 +25,4 @@ _Static_assert(sizeof(CONFIG_RADIO_BRIDGE_GROUP_KEY) == 33,
 #if CONFIG_RADIO_BRIDGE_UART_RING_SIZE < 16384
 #error "UART rings must be at least 16 KiB"
 #endif
-#if CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_COUNT < 1
-#error "at least one discovery response slot is required"
-#endif
-
 #endif

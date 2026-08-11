@@ -9,5 +9,7 @@ target_include_directories(app PRIVATE
 )
 target_sources(app PRIVATE
 	src/test_radio_address.c
+	src/test_radio_transport_policy.c
 	../../../src/radio/radio_address.c
+	../../../src/radio/radio_transport_policy.c
 )
