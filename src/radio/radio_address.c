@@ -10,8 +10,6 @@
 #define RB_DOMAIN_BROADCAST 0x01u
 #define RB_DOMAIN_BASE1 0x02u
 #define RB_DOMAIN_NODE_FIRST 0x11u
-#define RB_DOMAIN_TEMPORARY 0x20u
-#define RB_DOMAIN_DISCOVERY_SLOT 0x30u
 #define RB_DERIVATION_ATTEMPTS 256u
 
 static void derivation_block(uint8_t domain, uint8_t counter,
@@ -57,9 +55,7 @@ static bool radio_address_valid(const uint8_t base[4], uint8_t prefix)
 	}
 
 	/* Anomaly 107: prefix and the two least-significant base bytes cannot
-	 * all be zero for pipe 0. Applying it to every derived address keeps a
-	 * temporary address safe when it is installed as pipe 0.
-	 */
+	 * all be zero for pipe 0. */
 	return prefix != 0 || base[2] != 0 || base[3] != 0;
 }
 
@@ -125,52 +121,4 @@ int rb_radio_addresses_derive(uint32_t group_id, const uint8_t key[16],
 	}
 
 	return -ERANGE;
-}
-
-int rb_temporary_address_derive(uint32_t group_id, const uint8_t key[16],
-				uint64_t device_id, rb_aes128_fn aes,
-				void *aes_context, uint8_t address[5])
-{
-	if (key == NULL || aes == NULL || address == NULL) {
-		return -EINVAL;
-	}
-
-	for (uint16_t counter = 0; counter < RB_DERIVATION_ATTEMPTS; counter++) {
-		uint8_t output[16];
-		uint8_t candidate[5];
-		int err = derive(RB_DOMAIN_TEMPORARY, (uint8_t)counter, group_id,
-				 device_id, key, aes, aes_context, output);
-
-		if (err != 0) {
-			return err;
-		}
-		memcpy(candidate, &output[8], sizeof(candidate));
-		if (radio_address_valid(candidate, candidate[4])) {
-			memcpy(address, candidate, sizeof(candidate));
-			return 0;
-		}
-	}
-
-	return -ERANGE;
-}
-
-int rb_discovery_slot(const uint8_t key[16], uint32_t nonce,
-		      uint64_t device_id, rb_aes128_fn aes, void *aes_context,
-		      uint8_t *slot)
-{
-	uint8_t output[16];
-	int err;
-
-	if (key == NULL || aes == NULL || slot == NULL) {
-		return -EINVAL;
-	}
-
-	err = derive(RB_DOMAIN_DISCOVERY_SLOT, 0, nonce, device_id, key, aes,
-		     aes_context, output);
-	if (err != 0) {
-		return err;
-	}
-
-	*slot = (uint8_t)(sys_get_le32(output) % RB_DISCOVERY_SLOT_COUNT);
-	return 0;
 }

@@ -75,51 +75,9 @@ static int derive_addresses(rb_aes128_fn aes, void *context, void *output)
 					args->addresses);
 }
 
-struct temporary_args {
-	uint32_t group_id;
-	const uint8_t *key;
-	uint64_t device_id;
-	uint8_t *address;
-};
-
-static int derive_temporary(rb_aes128_fn aes, void *context, void *output)
-{
-	struct temporary_args *args = output;
-	return rb_temporary_address_derive(args->group_id, args->key, args->device_id,
-					   aes, context, args->address);
-}
-
-struct slot_args {
-	uint32_t nonce;
-	const uint8_t *key;
-	uint64_t device_id;
-	uint8_t *slot;
-};
-
-static int derive_slot(rb_aes128_fn aes, void *context, void *output)
-{
-	struct slot_args *args = output;
-	return rb_discovery_slot(args->key, args->nonce, args->device_id, aes, context,
-					args->slot);
-}
-
 int rb_radio_addresses_derive_nrf(uint32_t group_id, const uint8_t key[16],
 				  struct rb_radio_addresses *addresses)
 {
 	struct addresses_args args = {group_id, key, addresses};
 	return with_session(key, derive_addresses, &args);
-}
-
-int rb_temporary_address_derive_nrf(uint32_t group_id, const uint8_t key[16],
-				    uint64_t device_id, uint8_t address[5])
-{
-	struct temporary_args args = {group_id, key, device_id, address};
-	return with_session(key, derive_temporary, &args);
-}
-
-int rb_discovery_slot_nrf(const uint8_t key[16], uint32_t nonce,
-				  uint64_t device_id, uint8_t *slot)
-{
-	struct slot_args args = {nonce, key, device_id, slot};
-	return with_session(key, derive_slot, &args);
 }

@@ -9,20 +9,23 @@
 #include <helpers/nrfx_gppi.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/toolchain.h>
 
 #include "bridge_config.h"
+#include "radio_transport_policy.h"
 #include "timebase.h"
 
 LOG_MODULE_REGISTER(radio_transport, LOG_LEVEL_INF);
 
-#define RB_RADIO_EVENT_QUEUE_SIZE 8u
+#define RB_RADIO_EVENT_QUEUE_SIZE 32u
 #define RB_RADIO_RETAINED_DIAG_MAGIC 0x52424447u
 
 static struct rb_radio_transport_config transport_config;
 static enum rb_radio_profile current_profile;
 static struct k_msgq event_queue;
 static char event_queue_buffer[RB_RADIO_EVENT_QUEUE_SIZE * sizeof(struct rb_radio_event)];
+static atomic_t event_drop_count;
 static bool initialized;
 /* Tracks whether the ESB peripheral has actually completed esb_init() at
  * least once. Calling esb_stop_rx()/esb_disable() before that point is
@@ -39,6 +42,21 @@ static struct rb_radio_retained_diag retained_diag __noinit;
 static rb_radio_transport_wake_fn wake_callback;
 static nrfx_gppi_handle_t radio_capture_handle;
 static bool radio_capture_initialized;
+
+static int radio_event_enqueue(const struct rb_radio_event *event)
+{
+	int ret = k_msgq_put(&event_queue, event, K_NO_WAIT);
+
+	if (ret != 0) {
+		atomic_inc(&event_drop_count);
+	}
+	return ret;
+}
+
+uint32_t radio_transport_event_drop_count(void)
+{
+	return (uint32_t)atomic_get(&event_drop_count);
+}
 
 static int radio_capture_init(void)
 {
@@ -158,7 +176,7 @@ static int queue_injected_tx_success(void)
 	struct rb_radio_event event = {
 		.type = RB_RADIO_EVENT_TX_SUCCESS,
 	};
-	int ret = k_msgq_put(&event_queue, &event, K_NO_WAIT);
+	int ret = radio_event_enqueue(&event);
 
 	if (ret == 0 && wake_callback != NULL) {
 		wake_callback();
@@ -191,19 +209,6 @@ uint32_t radio_transport_loss_drop_count(void)
 	return loss_drop_count;
 }
 #endif /* CONFIG_RADIO_BRIDGE_TEST_LOSS_INJECTION */
-
-static enum esb_mode profile_mode(enum rb_radio_profile profile)
-{
-	switch (profile) {
-	case RB_RADIO_MASTER_DISCOVERY_PRX:
-	case RB_RADIO_SLAVE_GROUP_PRX:
-	case RB_RADIO_SLAVE_ASSIGN_PRX:
-	case RB_RADIO_SLAVE_ACTIVE_PRX:
-		return ESB_MODE_PRX;
-	default:
-		return ESB_MODE_PTX;
-	}
-}
 
 static void rb_esb_event_handler(const struct esb_evt *event)
 {
@@ -246,7 +251,7 @@ static void rb_esb_event_handler(const struct esb_evt *event)
 				continue;
 			}
 #endif
-			(void)k_msgq_put(&event_queue, &queued, K_NO_WAIT);
+			(void)radio_event_enqueue(&queued);
 		}
 		if (wake_callback != NULL) {
 			wake_callback();
@@ -257,7 +262,7 @@ static void rb_esb_event_handler(const struct esb_evt *event)
 		radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_EVENT_RETURNED, -ENOMSG);
 		return;
 	}
-	(void)k_msgq_put(&event_queue, &queued, K_NO_WAIT);
+	(void)radio_event_enqueue(&queued);
 	if (wake_callback != NULL) {
 		wake_callback();
 	}
@@ -265,7 +270,8 @@ static void rb_esb_event_handler(const struct esb_evt *event)
 }
 
 static int esb_configure(enum esb_mode mode, const uint8_t *base0,
-				 const uint8_t *base1, const uint8_t *prefixes)
+			 const uint8_t *base1, const uint8_t *prefixes,
+			 uint8_t pipe_mask)
 {
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 	uint8_t channel;
@@ -302,6 +308,11 @@ static int esb_configure(enum esb_mode mode, const uint8_t *base0,
 		LOG_ERR("esb_set_prefixes failed: %d", err);
 		return err;
 	}
+	err = esb_enable_pipes(pipe_mask);
+	if (err != 0) {
+		LOG_ERR("esb_enable_pipes(0x%02x) failed: %d", pipe_mask, err);
+		return err;
+	}
 	channel = (uint8_t)(2u + 2u * rb_channel_index(transport_config.group_id));
 	err = esb_set_rf_channel(channel);
 	if (err != 0) {
@@ -331,11 +342,18 @@ int radio_transport_init(const struct rb_radio_transport_config *config)
 {
 	uint8_t base0[4];
 	uint8_t prefixes[4];
+	uint8_t pipe_mask;
+	enum rb_radio_profile fixed_profile;
+	enum esb_mode fixed_mode;
 	int err;
 
 	if (config == NULL || config->group_id == 0u ||
 	    config->group_id == UINT32_MAX) {
 		return -EINVAL;
+	}
+	err = rb_radio_pipe_mask(config->master, config->node_id, &pipe_mask);
+	if (err != 0) {
+		return err;
 	}
 	err = radio_capture_init();
 	if (err != 0) {
@@ -348,14 +366,17 @@ int radio_transport_init(const struct rb_radio_transport_config *config)
 	diagnostic_runtime_action = 0u;
 	diagnostic_radio_event_id = 0u;
 	diagnostic_payload_length = 0u;
-	diagnostic_target_profile = config->master ? RB_RADIO_MASTER_PTX :
-		RB_RADIO_SLAVE_GROUP_PRX;
+	atomic_set(&event_drop_count, 0);
+	fixed_profile = config->master ? RB_RADIO_MASTER_PTX : RB_RADIO_SLAVE_PRX;
+	fixed_mode = config->master ? ESB_MODE_PTX : ESB_MODE_PRX;
+	current_profile = fixed_profile;
+	diagnostic_target_profile = fixed_profile;
 	radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_TRANSPORT_INIT, 0);
-	LOG_INF("radio_transport_init: master=%d group_id=%u",
-		config->master, config->group_id);
+	LOG_INF("radio_transport_init: master=%d node_id=%u group_id=%u pipes=0x%02x",
+		config->master, config->node_id, config->group_id, pipe_mask);
 	k_msgq_init(&event_queue, event_queue_buffer, sizeof(struct rb_radio_event),
 			RB_RADIO_EVENT_QUEUE_SIZE);
-	initialized = true;
+	initialized = false;
 
 	/* On a cold boot, the very first ESB profile switch has been observed to
 	 * hang indefinitely when it goes straight into PRX mode (esb_start_rx()
@@ -367,10 +388,9 @@ int radio_transport_init(const struct rb_radio_transport_config *config)
 	prefixes[1] = transport_config.addresses.node_prefix[0];
 	prefixes[2] = transport_config.addresses.node_prefix[1];
 	prefixes[3] = transport_config.addresses.node_prefix[2];
-	radio_boot_diagnostic_begin(config->master ? RB_RADIO_MASTER_PTX :
-				    RB_RADIO_SLAVE_GROUP_PRX);
+	radio_boot_diagnostic_begin(fixed_profile);
 	err = esb_configure(ESB_MODE_PTX, base0,
-			    transport_config.addresses.base1, prefixes);
+			    transport_config.addresses.base1, prefixes, pipe_mask);
 	radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_PROFILE_RETURNED, err);
 	if (err != 0) {
 		LOG_WRN("ESB PTX warmup failed: %d (continuing anyway)", err);
@@ -378,46 +398,18 @@ int radio_transport_init(const struct rb_radio_transport_config *config)
 		esb_active = true;
 	}
 
-	return radio_transport_set_profile(config->master ? RB_RADIO_MASTER_PTX :
-					  RB_RADIO_SLAVE_GROUP_PRX, 0, NULL);
-}
-
-int radio_transport_set_profile(enum rb_radio_profile profile,
-				uint8_t node_id, const uint8_t temporary_address[5])
-{
-	uint8_t prefixes[4] = {transport_config.addresses.prefix0,
-				      transport_config.addresses.node_prefix[0],
-				      transport_config.addresses.node_prefix[1],
-				      transport_config.addresses.node_prefix[2]};
-	uint8_t base0[4];
-	int err;
-
-	if (!initialized || node_id > 3u) {
-		return -EINVAL;
-	}
-	if (temporary_address != NULL &&
-	    (profile == RB_RADIO_SLAVE_HELLO_PTX ||
-	     profile == RB_RADIO_SLAVE_ASSIGN_PRX ||
-	     profile == RB_RADIO_MASTER_ASSIGN_PTX)) {
-		memcpy(base0, temporary_address, sizeof(base0));
-		prefixes[0] = temporary_address[4];
-	} else {
-		memcpy(base0, transport_config.addresses.base0, sizeof(base0));
-	}
-	radio_boot_diagnostic_begin(profile);
+	radio_boot_diagnostic_begin(fixed_profile);
 	if (esb_active) {
-		radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_STOP_RX, 0);
-		err = esb_stop_rx();
-		radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_STOP_RX_DONE, err);
 		radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_DISABLE, 0);
 		esb_disable();
 		radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_DISABLE_DONE, 0);
+		esb_active = false;
 	}
-	current_profile = profile;
-	err = esb_configure(profile_mode(profile), base0,
-			    transport_config.addresses.base1, prefixes);
+	err = esb_configure(fixed_mode, base0, transport_config.addresses.base1,
+			    prefixes, pipe_mask);
 	if (err == 0) {
 		esb_active = true;
+		initialized = true;
 	}
 	radio_boot_stage_mark(RB_RADIO_BOOT_STAGE_PROFILE_RETURNED, err);
 	return err;
@@ -453,6 +445,13 @@ int radio_transport_send(uint8_t pipe, bool no_ack,
 int radio_transport_queue_ack(uint8_t pipe, const uint8_t *data, size_t len)
 {
 	return radio_transport_send(pipe, false, data, len);
+}
+
+int radio_transport_replace_ack(uint8_t pipe, const uint8_t *data, size_t len)
+{
+	int err = esb_flush_tx();
+
+	return err == 0 ? radio_transport_queue_ack(pipe, data, len) : err;
 }
 
 int radio_transport_get_event(struct rb_radio_event *event, k_timeout_t timeout)

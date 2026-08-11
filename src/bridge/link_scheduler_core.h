@@ -5,22 +5,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "fixed_peer_table.h"
 #include "link_protocol.h"
-#include "link_window.h"
-#include "membership.h"
 #include "record_queue.h"
 
 enum rb_scheduler_action_type {
 	RB_ACTION_NONE,
-	RB_ACTION_SEND_SYNC_DISCOVERY,
-	RB_ACTION_ENTER_DISCOVERY_RX,
-	RB_ACTION_SEND_ASSIGN,
+	RB_ACTION_SEND_SYNC,
 	RB_ACTION_SEND_DOWNLINK_BROADCAST,
 	RB_ACTION_SEND_POLL,
 	RB_ACTION_QUEUE_ACK,
-	RB_ACTION_SEND_HELLO,
-	RB_ACTION_ENTER_ASSIGN_RX,
-	RB_ACTION_ENTER_GROUP_RX,
 };
 
 enum rb_radio_event_view_type {
@@ -42,8 +36,8 @@ struct rb_scheduler_action {
 	enum rb_scheduler_action_type type;
 	uint8_t node_id;
 	uint8_t pipe;
-	uint64_t target_device_id;
 	bool no_ack;
+	bool replace_ack;
 	uint64_t due_tick;
 	uint8_t wire[RB_ESB_MAX_PAYLOAD];
 	size_t wire_len;
@@ -51,16 +45,15 @@ struct rb_scheduler_action {
 
 struct rb_scheduler_config {
 	bool master;
+	uint8_t node_id;
 	uint32_t group_id;
 	uint32_t master_session;
-	uint64_t device_id;
+	uint32_t slave_session;
+	uint64_t local_device_id;
 	uint32_t sync_interval_us;
 	uint32_t aggregation_timeout_us;
 	uint32_t max_idle_poll_us;
 	uint32_t lease_timeout_us;
-	uint32_t assignment_window_us;
-	uint8_t response_slot_count;
-	uint16_t response_slot_us;
 };
 
 struct rb_scheduler_time_publication {
@@ -68,42 +61,31 @@ struct rb_scheduler_time_publication {
 	uint8_t time_quality;
 };
 
-#define RB_SCHEDULER_MAX_PEERS RB_MEMBERSHIP_MAX_PEERS
+#define RB_SCHEDULER_MAX_PEERS RB_FIXED_PEER_COUNT
 #define RB_SCHEDULER_UART_QUEUE_SIZE 16384u
-#define RB_SCHEDULER_DEFAULT_DOWNLINK_EPOCH 1u
-#define RB_SCHEDULER_DEFAULT_UPLINK_EPOCH 1u
 #define RB_SCHEDULER_DEFAULT_IDLE_POLL_US 1000u
+#define RB_SCHEDULER_INACTIVE_PROBE_US 20000u
 #define RB_SCHEDULER_RECORD_LENGTH_CAPACITY \
 	((RB_SCHEDULER_UART_QUEUE_SIZE + RB_ACK_UPLINK_PAYLOAD_MAX - 1u) / \
 	 RB_ACK_UPLINK_PAYLOAD_MAX)
 
 struct rb_scheduler_peer_runtime {
-	uint32_t next_poll_due_us;
+	uint64_t next_poll_due_us;
 	uint32_t poll_interval_us;
-	uint32_t poll_sequence;
-	uint32_t uplink_ack_base;
+	uint16_t poll_sequence;
+	uint32_t uplink_ack_sequence;
+	uint32_t poll_failure_count;
 	bool data_ready;
-	bool poll_retry_backoff;
-};
-
-struct rb_scheduler_candidate {
-	uint64_t device_id;
-	uint32_t capabilities;
-	uint32_t discovery_nonce;
-	bool queued;
 };
 
 struct rb_scheduler_core {
 	struct rb_scheduler_config config;
-	struct rb_membership membership;
+	struct rb_fixed_peer_table fixed_peers;
 	struct rb_scheduler_peer_runtime peer[RB_SCHEDULER_MAX_PEERS];
-	struct rb_scheduler_candidate candidates[RB_SCHEDULER_MAX_PEERS];
-	uint8_t candidate_count;
-	uint8_t candidate_next;
 	uint8_t poll_cursor;
-	uint8_t free_slots;
-	uint32_t downlink_epoch;
-	uint32_t uplink_epoch;
+	uint8_t probe_cursor;
+	uint64_t next_probe_due_us;
+	bool probe_preceded_overdue_sync;
 	uint32_t next_downlink_sequence;
 	uint64_t next_sync_tick;
 	uint64_t first_uart_tick;
@@ -113,45 +95,22 @@ struct rb_scheduler_core {
 	uint8_t queued_wire[RB_ESB_MAX_PAYLOAD];
 	size_t queued_wire_len;
 	bool queued_broadcast;
-	bool discovery_rx_pending;
-	uint64_t response_window_deadline;
-	bool sync_in_flight;
 	bool transaction_in_flight;
-	/* Failed action submissions must not be retried in a tight loop. */
 	uint64_t action_retry_not_before_us;
 	uint8_t in_flight_node;
-	uint8_t in_flight_pipe;
 	enum rb_scheduler_action_type in_flight_type;
-	bool in_flight_poll_data_ready;
-	uint16_t next_lease_id;
-	uint16_t next_stream_epoch;
-	/* Candidate/assigned-slave state is kept here so the same pure core can
-	 * serve Task 13 without a second scheduler implementation. */
 	bool slave_active;
 	uint8_t slave_node_id;
-	uint16_t slave_lease_id;
-	uint16_t slave_downlink_epoch;
-	uint16_t slave_uplink_epoch;
-	uint64_t slave_hello_due_tick;
-	uint32_t slave_discovery_nonce;
-	uint8_t slave_discovery_slot;
-	bool slave_discovery_slot_valid;
-	uint64_t slave_assign_rx_deadline;
-	bool slave_hello_pending;
-	bool slave_assign_rx_pending;
-	bool slave_assign_rx_active;
-	bool slave_group_rx_pending;
+	uint64_t slave_last_poll_us;
 	bool slave_ack_pending;
-	bool slave_ack_ready;
+	bool slave_ack_replace;
 	uint8_t slave_ack_wire[RB_ESB_MAX_PAYLOAD];
 	size_t slave_ack_wire_len;
 	uint16_t slave_credit_bytes;
-	uint16_t slave_last_poll_sequence;
 	uint32_t slave_uplink_inflight_sequence;
 	size_t slave_uplink_inflight_len;
 	bool slave_uplink_inflight;
 	uint32_t slave_last_downlink_sequence;
-	struct rb_slave_lease slave_lease;
 	uint8_t slave_uart_queue[RB_SCHEDULER_UART_QUEUE_SIZE];
 	uint16_t slave_uart_head;
 	uint16_t slave_uart_count;
@@ -173,16 +132,14 @@ struct rb_scheduler_core {
 	uint64_t downlink_gap_count;
 	uint64_t downlink_duplicate_count;
 	uint64_t invalid_session_rx_count;
+	uint64_t invalid_node_rx_count;
 	struct rb_scheduler_time_publication time_publication;
 };
 
 void rb_scheduler_init(struct rb_scheduler_core *core,
-			 const struct rb_scheduler_config *config);
-int rb_scheduler_add_active_peer(struct rb_scheduler_core *core,
-				 uint8_t node_id, uint64_t device_id,
-				 uint16_t lease_id, uint64_t now_us);
+		       const struct rb_scheduler_config *config);
 int rb_scheduler_queue_downlink(struct rb_scheduler_core *core,
-				const uint8_t *data, size_t len);
+			const uint8_t *data, size_t len);
 size_t rb_scheduler_uart_write(struct rb_scheduler_core *core,
 			       const uint8_t *data, size_t len, uint64_t now_us);
 size_t rb_scheduler_uart_available(const struct rb_scheduler_core *core);
@@ -195,34 +152,34 @@ void rb_scheduler_on_radio_event(struct rb_scheduler_core *core,
 				 const struct rb_radio_event_view *event,
 				 uint64_t now_us);
 void rb_scheduler_mark_peer_idle(struct rb_scheduler_core *core,
-					 uint8_t node_id, uint64_t now_us);
+				 uint8_t node_id, uint64_t now_us);
 void rb_scheduler_mark_peer_data(struct rb_scheduler_core *core,
-					 uint8_t node_id, uint64_t now_us);
-void rb_scheduler_mark_peer_suspect(struct rb_scheduler_core *core,
-					    uint8_t node_id, uint64_t now_us);
+				 uint8_t node_id, uint64_t now_us);
 void rb_scheduler_set_sync_deadline(struct rb_scheduler_core *core,
-					    uint64_t tick);
-void rb_scheduler_set_free_slots(struct rb_scheduler_core *core,
-				 uint8_t free_slots);
-void rb_scheduler_set_discovery_slot(struct rb_scheduler_core *core,
-					 uint8_t slot);
+				    uint64_t tick);
 int rb_scheduler_set_time_publication(struct rb_scheduler_core *core,
 				      int64_t next_pps_utc_seconds,
 				      uint8_t time_quality);
 uint32_t rb_scheduler_peer_poll_interval(const struct rb_scheduler_core *core,
-						 uint8_t node_id);
+					 uint8_t node_id);
+int64_t rb_scheduler_peer_ack_age_us(const struct rb_scheduler_core *core,
+				     uint8_t node_id, uint64_t now_us);
+uint32_t rb_scheduler_peer_poll_failure_count(
+	const struct rb_scheduler_core *core, uint8_t node_id);
 uint8_t rb_scheduler_active_count(const struct rb_scheduler_core *core);
+uint8_t rb_scheduler_active_mask(const struct rb_scheduler_core *core);
 uint64_t rb_scheduler_queue_drop_bytes(const struct rb_scheduler_core *core);
 uint64_t rb_scheduler_duplicate_count(const struct rb_scheduler_core *core);
 uint64_t rb_scheduler_downlink_gap_count(const struct rb_scheduler_core *core);
 uint64_t rb_scheduler_downlink_duplicate_count(
 	const struct rb_scheduler_core *core);
 uint64_t rb_scheduler_invalid_session_count(const struct rb_scheduler_core *core);
+uint64_t rb_scheduler_invalid_node_count(const struct rb_scheduler_core *core);
 uint32_t rb_scheduler_session(const struct rb_scheduler_core *core);
 int rb_scheduler_reset_session(struct rb_scheduler_core *core,
 			       uint32_t master_session);
 size_t rb_scheduler_slave_read_uart(struct rb_scheduler_core *core,
-					uint8_t *data, size_t max_len);
+				    uint8_t *data, size_t max_len);
 int rb_scheduler_master_peek_record(struct rb_scheduler_core *core,
 				    uint8_t *node_id, uint8_t *data,
 				    size_t max_len, size_t *record_len);

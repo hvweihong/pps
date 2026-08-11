@@ -1,6 +1,7 @@
 #include "bridge_validation.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <string.h>
 
 void rb_validation_pipe_init(struct rb_validation_pipe *pipe)
@@ -124,6 +125,52 @@ int rb_validation_verify_output(struct rb_validation_pipe *pipe, size_t len,
 	if (mismatch_offset != NULL) {
 		*mismatch_offset = len;
 	}
+	return 0;
+}
+
+static bool output_matches_pattern(const struct rb_validation_pipe *pipe,
+				   size_t offset, size_t len, uint8_t seed)
+{
+	for (size_t i = 0u; i < len; i++) {
+		size_t index = (pipe->output.read_index + offset + i) %
+			pipe->output.capacity;
+
+		if (pipe->output.storage[index] != (uint8_t)(seed + i)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+int rb_validation_verify_pair(struct rb_validation_pipe *pipe,
+			      size_t first_len, uint8_t first_seed,
+			      size_t second_len, uint8_t second_seed)
+{
+	size_t total_len;
+	bool first_then_second;
+	bool second_then_first;
+
+	if (pipe == NULL || first_len == 0u || second_len == 0u ||
+	    first_len > SIZE_MAX - second_len) {
+		return -EINVAL;
+	}
+	if (pipe->output.dropped_bytes != 0u) {
+		return -EOVERFLOW;
+	}
+	total_len = first_len + second_len;
+	if (rb_byte_ring_size(&pipe->output) < total_len) {
+		return -EAGAIN;
+	}
+	first_then_second = output_matches_pattern(pipe, 0u, first_len,
+						    first_seed) &&
+		output_matches_pattern(pipe, first_len, second_len, second_seed);
+	second_then_first = output_matches_pattern(pipe, 0u, second_len,
+						     second_seed) &&
+		output_matches_pattern(pipe, second_len, first_len, first_seed);
+	if (!first_then_second && !second_then_first) {
+		return -EBADMSG;
+	}
+	(void)rb_byte_ring_discard(&pipe->output, total_len);
 	return 0;
 }
 

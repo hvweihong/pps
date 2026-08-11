@@ -37,6 +37,9 @@ size_t rb_validation_copy_output(const struct rb_validation_pipe *pipe,
 				 size_t offset, uint8_t *data, size_t max_len);
 int rb_validation_verify_output(struct rb_validation_pipe *pipe, size_t len,
 				uint8_t seed, size_t *mismatch_offset);
+int rb_validation_verify_pair(struct rb_validation_pipe *pipe,
+			      size_t first_len, uint8_t first_seed,
+			      size_t second_len, uint8_t second_seed);
 size_t rb_validation_input_size(const struct rb_validation_pipe *pipe);
 size_t rb_validation_output_size(const struct rb_validation_pipe *pipe);
 void rb_validation_clear(struct rb_validation_pipe *pipe);

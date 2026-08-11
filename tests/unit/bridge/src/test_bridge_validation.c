@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <zephyr/ztest.h>
 
@@ -94,6 +95,44 @@ ZTEST(bridge_validation, test_output_overflow_preserves_existing_bytes_and_fails
 	zassert_equal(rb_validation_verify_output(&pipe, sizeof(preview), 0x20u,
 					  &mismatch), -EOVERFLOW);
 	zassert_equal(rb_validation_output_size(&pipe), sizeof(payload));
+}
+
+ZTEST(bridge_validation, test_two_records_accept_either_order_not_interleaving)
+{
+	struct rb_validation_pipe pipe;
+	uint8_t first[32];
+	uint8_t second[48];
+	uint8_t interleaved[sizeof(first) + sizeof(second)];
+
+	for (size_t i = 0u; i < sizeof(first); i++) {
+		first[i] = (uint8_t)(17u + i);
+	}
+	for (size_t i = 0u; i < sizeof(second); i++) {
+		second[i] = (uint8_t)(91u + i);
+	}
+	rb_validation_pipe_init(&pipe);
+	zassert_equal(rb_validation_capture_output(&pipe, second, sizeof(second)),
+		      sizeof(second));
+	zassert_equal(rb_validation_capture_output(&pipe, first, sizeof(first)),
+		      sizeof(first));
+	zassert_ok(rb_validation_verify_pair(&pipe, sizeof(first), 17u,
+					 sizeof(second), 91u));
+	zassert_equal(rb_validation_output_size(&pipe), 0u);
+
+	for (size_t i = 0u; i < sizeof(first); i++) {
+		interleaved[i * 2u] = first[i];
+		interleaved[i * 2u + 1u] = second[i];
+	}
+	memcpy(&interleaved[sizeof(first) * 2u], &second[sizeof(first)],
+	       sizeof(second) - sizeof(first));
+	rb_validation_pipe_init(&pipe);
+	zassert_equal(rb_validation_capture_output(&pipe, interleaved,
+					   sizeof(interleaved)),
+		      sizeof(interleaved));
+	zassert_equal(rb_validation_verify_pair(&pipe, sizeof(first), 17u,
+					 sizeof(second), 91u),
+		      -EBADMSG);
+	zassert_equal(rb_validation_output_size(&pipe), sizeof(interleaved));
 }
 
 ZTEST_SUITE(bridge_validation, NULL, NULL, NULL, NULL, NULL);

@@ -16,8 +16,11 @@ struct rb_uart_stats {
 	uint32_t tx_record_pending;
 	uint32_t tx_start_errors;
 	uint8_t tx_record_busy;
+	uint32_t rx_stopped_events;
+	uint32_t rx_stop_reason_mask;
 	uint32_t rx_disabled_events;
 	uint32_t rx_restart_errors;
+	uint32_t rx_restart_delay_ms;
 };
 
 typedef void (*rb_uart_bridge_wake_fn)(void);

@@ -11,6 +11,7 @@
 
 #include "byte_ring.h"
 #include "record_queue.h"
+#include "uart_rx_recovery.h"
 
 #if !DT_NODE_HAS_STATUS(DT_ALIAS(bridge_uart), okay)
 #error "bridge-uart alias is required"
@@ -38,6 +39,44 @@ static size_t tx_record_len;
 static size_t tx_dma_offset;
 static uint8_t next_rx_buffer;
 static rb_uart_bridge_wake_fn wake_callback;
+static struct rb_uart_rx_recovery rx_recovery;
+
+static void rx_restart_work_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(rx_restart_work, rx_restart_work_handler);
+
+static void schedule_rx_restart(void)
+{
+	uint32_t delay_ms;
+	{
+		k_spinlock_key_t key = k_spin_lock(&state_lock);
+
+		delay_ms = rb_uart_rx_recovery_next_delay_ms(&rx_recovery);
+		stats.rx_restart_delay_ms = delay_ms;
+		k_spin_unlock(&state_lock, key);
+	}
+	(void)k_work_reschedule(&rx_restart_work, K_MSEC(delay_ms));
+}
+
+static void rx_restart_work_handler(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+	err = uart_rx_enable(uart_dev, rx_dma_buf[next_rx_buffer],
+			     sizeof(rx_dma_buf[next_rx_buffer]),
+			     CONFIG_RADIO_BRIDGE_AGGREGATION_TIMEOUT_US);
+	if (err == 0) {
+		next_rx_buffer ^= 1u;
+		return;
+	}
+	{
+		k_spinlock_key_t key = k_spin_lock(&state_lock);
+
+		stats.rx_restart_errors++;
+		k_spin_unlock(&state_lock, key);
+	}
+	schedule_rx_restart();
+}
 
 /*
  * The async UART callback is allowed to run from interrupt context.  Keep all
@@ -100,6 +139,15 @@ static void capture_rx_locked(const uint8_t *data, size_t len)
 	stats.rx_drop_bytes = rx_ring.dropped_bytes;
 }
 
+static bool capture_event_rx_locked(const struct uart_event_rx *rx)
+{
+	if (rx == NULL || rx->buf == NULL || rx->len == 0u) {
+		return false;
+	}
+	capture_rx_locked(rx->buf + rx->offset, rx->len);
+	return true;
+}
+
 static void uart_callback(const struct device *dev, struct uart_event *event,
 			  void *user_data)
 {
@@ -110,10 +158,14 @@ static void uart_callback(const struct device *dev, struct uart_event *event,
 	case UART_RX_RDY:
 	{
 		k_spinlock_key_t key = k_spin_lock(&state_lock);
-		capture_rx_locked(event->data.rx.buf + event->data.rx.offset,
-				  event->data.rx.len);
+		bool has_data = capture_event_rx_locked(&event->data.rx);
+
+		if (has_data) {
+			rb_uart_rx_recovery_reset(&rx_recovery);
+			stats.rx_restart_delay_ms = 0u;
+		}
 		k_spin_unlock(&state_lock, key);
-		if (wake_callback != NULL) {
+		if (has_data && wake_callback != NULL) {
 			wake_callback();
 		}
 	}
@@ -122,9 +174,11 @@ static void uart_callback(const struct device *dev, struct uart_event *event,
 	{
 		const struct uart_event_rx *rx = &event->data.rx_stop.data;
 		k_spinlock_key_t key = k_spin_lock(&state_lock);
-		capture_rx_locked(rx->buf + rx->offset, rx->len);
+		stats.rx_stopped_events++;
+		stats.rx_stop_reason_mask |= event->data.rx_stop.reason;
+		(void)capture_event_rx_locked(rx);
 		k_spin_unlock(&state_lock, key);
-		if (wake_callback != NULL) {
+		if (rx->len != 0u && wake_callback != NULL) {
 			wake_callback();
 		}
 	}
@@ -143,15 +197,7 @@ static void uart_callback(const struct device *dev, struct uart_event *event,
 		stats.rx_disabled_events++;
 		k_spin_unlock(&state_lock, key);
 	}
-		if (uart_rx_enable(uart_dev, rx_dma_buf[next_rx_buffer],
-				   sizeof(rx_dma_buf[next_rx_buffer]),
-				   CONFIG_RADIO_BRIDGE_AGGREGATION_TIMEOUT_US) != 0) {
-			k_spinlock_key_t key = k_spin_lock(&state_lock);
-			stats.rx_restart_errors++;
-			k_spin_unlock(&state_lock, key);
-		} else {
-			next_rx_buffer ^= 1u;
-		}
+		schedule_rx_restart();
 		break;
 	case UART_TX_DONE:
 	{
@@ -212,6 +258,7 @@ int uart_bridge_init(uint32_t baudrate)
 			     tx_record_lengths, RB_UART_TX_RECORD_CAPACITY);
 	memset(&stats, 0, sizeof(stats));
 	memset(&stats_snapshot, 0, sizeof(stats_snapshot));
+	rb_uart_rx_recovery_init(&rx_recovery);
 	tx_busy = false;
 	tx_record_loaded = false;
 	tx_record_len = 0u;

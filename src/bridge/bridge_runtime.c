@@ -53,10 +53,8 @@ static uint32_t runtime_pps_input_delay_us;
 static uint64_t local_device_id;
 static bool initialized;
 static bool started;
-static enum rb_radio_profile current_profile;
 static struct rb_wireless_time_sync wireless_sync;
 static struct sync_filter sync_filter_runtime;
-static uint8_t local_discovery_slot;
 static uint32_t pending_sync_sequence;
 static bool pending_sync_capture;
 static struct rb_utc_clock utc_clock;
@@ -74,6 +72,7 @@ static struct rb_validation_pipe validation_pipe;
 static struct k_spinlock validation_lock;
 static int64_t validation_pair_seconds;
 static uint8_t validation_time_command;
+static uint32_t runtime_uart_baudrate;
 #endif
 
 static uint64_t read_device_id(void)
@@ -249,7 +248,7 @@ static void runtime_consume_validation_time(void)
 }
 #endif
 
-static void runtime_apply_wireless_utc(const struct rb_sync_discovery *frame)
+static void runtime_apply_wireless_utc(const struct rb_sync_frame *frame)
 {
 	if (frame->time_quality == RB_TIME_HOLDOVER &&
 	    bridge_stats.utc_quality != RB_TIME_HOLDOVER) {
@@ -306,14 +305,14 @@ static void runtime_time_tick(uint64_t now_tick)
 
 static void runtime_apply_sync(const struct rb_radio_event *event)
 {
-	struct rb_sync_discovery frame;
+	struct rb_sync_frame frame;
 	struct sync_observation observation;
 	uint64_t local_pps;
 	int ret;
 
 	if (scheduler.config.master || event == NULL ||
 	    event->type != RB_RADIO_EVENT_RX_RECEIVED ||
-	    rb_sync_discovery_decode(event->data, event->length, &frame) != 0) {
+	    rb_sync_decode(event->data, event->length, &frame) != 0) {
 		return;
 	}
 	if (!rb_bridge_runtime_accept_sync_group(runtime_group_id, frame.group_id,
@@ -330,10 +329,6 @@ static void runtime_apply_sync(const struct rb_radio_event *event)
 		bridge_stats.sync_jitter = 0u;
 		bridge_stats.sync_last_error = 0;
 		bridge_stats.sync_relock_count++;
-	}
-	if (rb_discovery_slot_nrf(group_key, frame.discovery_nonce,
-					 local_device_id, &local_discovery_slot) == 0) {
-		rb_scheduler_set_discovery_slot(&scheduler, local_discovery_slot);
 	}
 	bridge_stats.sync_rx_count++;
 	bridge_stats.sync_last_sequence = frame.sync_sequence;
@@ -484,59 +479,19 @@ static void runtime_push_uart_tx(void)
 
 static int runtime_execute_action(struct rb_scheduler_action *action)
 {
-	uint8_t temporary[5];
 	int ret;
 
 	if (action == NULL) {
 		return -EINVAL;
 	}
 	switch (action->type) {
-	case RB_ACTION_SEND_HELLO:
-		/* HELLO is sent on the stable group address.  The candidate switches to
-		 * its temporary DEVICEID-derived address only while awaiting ASSIGN. */
-		ret = radio_transport_set_profile(RB_RADIO_SLAVE_HELLO_PTX, 0, NULL);
-		if (ret != 0) {
-			return ret;
-		}
-		bridge_stats.discovery_hello_count++;
-		current_profile = RB_RADIO_SLAVE_HELLO_PTX;
-		return radio_transport_send(0, true, action->wire, action->wire_len);
-	case RB_ACTION_ENTER_ASSIGN_RX:
-		ret = rb_temporary_address_derive_nrf(runtime_group_id,
-						 group_key, local_device_id, temporary);
-		if (ret != 0) {
-			return ret;
-		}
-		ret = radio_transport_set_profile(RB_RADIO_SLAVE_ASSIGN_PRX, 0,
-						 temporary);
-		if (ret == 0) {
-			current_profile = RB_RADIO_SLAVE_ASSIGN_PRX;
-		}
-		return ret;
-	case RB_ACTION_ENTER_GROUP_RX:
-		ret = radio_transport_set_profile(RB_RADIO_SLAVE_GROUP_PRX, 0, NULL);
-		if (ret == 0) {
-			current_profile = RB_RADIO_SLAVE_GROUP_PRX;
-		}
-		return ret;
-	case RB_ACTION_ENTER_DISCOVERY_RX:
-		ret = radio_transport_set_profile(RB_RADIO_MASTER_DISCOVERY_PRX, 0, NULL);
-		if (ret == 0) {
-			current_profile = RB_RADIO_MASTER_DISCOVERY_PRX;
-		}
-		return ret;
 	case RB_ACTION_QUEUE_ACK:
-		return radio_transport_queue_ack(action->pipe, action->wire,
-						 action->wire_len);
+		return action->replace_ack ?
+			radio_transport_replace_ack(action->pipe, action->wire,
+						    action->wire_len) :
+			radio_transport_queue_ack(action->pipe, action->wire,
+						  action->wire_len);
 	case RB_ACTION_SEND_DOWNLINK_BROADCAST:
-		if (scheduler.config.master &&
-		    current_profile != RB_RADIO_MASTER_PTX) {
-			ret = radio_transport_set_profile(RB_RADIO_MASTER_PTX, 0, NULL);
-			if (ret != 0) {
-				return ret;
-			}
-			current_profile = RB_RADIO_MASTER_PTX;
-		}
 		ret = radio_transport_send(action->pipe, true,
 					   action->wire, action->wire_len);
 		if (ret == 0) {
@@ -544,22 +499,14 @@ static int runtime_execute_action(struct rb_scheduler_action *action)
 			bridge_stats.broadcast_packets++;
 		}
 		return ret;
-	case RB_ACTION_SEND_SYNC_DISCOVERY:
+	case RB_ACTION_SEND_SYNC:
 	case RB_ACTION_SEND_POLL:
-		if (scheduler.config.master &&
-		    current_profile != RB_RADIO_MASTER_PTX) {
-			ret = radio_transport_set_profile(RB_RADIO_MASTER_PTX, 0, NULL);
-			if (ret != 0) {
-				return ret;
-			}
-			current_profile = RB_RADIO_MASTER_PTX;
-		}
-		if (action->type == RB_ACTION_SEND_SYNC_DISCOVERY) {
-			struct rb_sync_discovery scheduled;
-			struct rb_sync_discovery published;
+		if (action->type == RB_ACTION_SEND_SYNC) {
+			struct rb_sync_frame scheduled;
+			struct rb_sync_frame published;
 			uint64_t next_pps = pps_output_scheduled_tick();
-			if (rb_sync_discovery_decode(action->wire, action->wire_len,
-							     &scheduled) != 0) {
+			if (rb_sync_decode(action->wire, action->wire_len,
+					   &scheduled) != 0) {
 				return -EBADMSG;
 			}
 			if (next_pps <= timebase_now_us()) {
@@ -574,16 +521,12 @@ static int runtime_execute_action(struct rb_scheduler_action *action)
 			published.master_id = scheduled.master_id;
 			published.sync_sequence = scheduled.sync_sequence;
 			published.sync_interval_us = scheduled.sync_interval_us;
-			published.discovery_nonce = scheduled.discovery_nonce;
-			published.free_slots = scheduled.free_slots;
-			published.response_slot_count = scheduled.response_slot_count;
-			published.response_slot_us = scheduled.response_slot_us;
 			published.next_pps_utc_seconds =
 				scheduled.next_pps_utc_seconds;
 			published.time_quality = scheduled.time_quality;
-			if (rb_sync_discovery_encode(&published, action->wire,
-						     sizeof(action->wire),
-						     &action->wire_len) != 0) {
+			if (rb_sync_encode(&published, action->wire,
+					   sizeof(action->wire),
+					   &action->wire_len) != 0) {
 				return -EINVAL;
 			}
 			bridge_stats.sync_tx_build_count++;
@@ -601,29 +544,6 @@ static int runtime_execute_action(struct rb_scheduler_action *action)
 			if (action->type == RB_ACTION_SEND_POLL) {
 				bridge_stats.poll_packets++;
 			}
-		}
-		return ret;
-	case RB_ACTION_SEND_ASSIGN:
-		ret = rb_temporary_address_derive_nrf(runtime_group_id,
-						 group_key, action->target_device_id,
-						 temporary);
-		if (ret != 0) {
-			return ret;
-		}
-		ret = radio_transport_set_profile(RB_RADIO_MASTER_ASSIGN_PTX,
-						 action->node_id, temporary);
-		if (ret != 0) {
-			return ret;
-		}
-		current_profile = RB_RADIO_MASTER_ASSIGN_PTX;
-		/* The temporary DEVICEID address is installed as ESB pipe 0 on the
-		 * candidate.  The scheduler pipe is the eventual node ID and is kept
-		 * for membership bookkeeping; it must not select a stable group prefix
-		 * while the temporary profile is active. */
-		ret = radio_transport_send(0, false,
-						 action->wire, action->wire_len);
-		if (ret == 0) {
-			bridge_stats.radio_tx_packets++;
 		}
 		return ret;
 	case RB_ACTION_NONE:
@@ -759,6 +679,9 @@ int bridge_runtime_init(void)
 		LOG_ERR("Failed to read uart_baudrate: %d", ret);
 		return ret;
 	}
+	#if defined(CONFIG_RADIO_BRIDGE_VALIDATION_CDC)
+	runtime_uart_baudrate = uart_baud;
+	#endif
 	ret = rb_param_get_uint32(RB_PARAM_RADIO_DELAY_US, &radio_delay_us);
 	if (ret != 0) {
 		LOG_ERR("Failed to read radio_delay_us: %d", ret);
@@ -810,6 +733,9 @@ int bridge_runtime_init(void)
 	}
 
 	bool is_master = (role_id == 0u);
+	if (role_id > RB_MAX_SOURCE_NODE) {
+		return -EINVAL;
+	}
 
 	ret = rb_radio_addresses_derive_nrf(group_id, group_key, &radio_addresses);
 	if (ret != 0) {
@@ -818,16 +744,15 @@ int bridge_runtime_init(void)
 
 	config = (struct rb_scheduler_config){
 		.master = is_master,
+		.node_id = (uint8_t)role_id,
 		.group_id = group_id,
-		.master_session = new_nonzero_session(),
-		.device_id = local_device_id,
+		.master_session = is_master ? new_nonzero_session() : 0u,
+		.slave_session = is_master ? 0u : new_nonzero_session(),
+		.local_device_id = local_device_id,
 		.sync_interval_us = CONFIG_RADIO_BRIDGE_SYNC_INTERVAL_US,
 		.aggregation_timeout_us = CONFIG_RADIO_BRIDGE_AGGREGATION_TIMEOUT_US,
 		.max_idle_poll_us = CONFIG_RADIO_BRIDGE_IDLE_POLL_MAX_US,
 		.lease_timeout_us = CONFIG_RADIO_BRIDGE_LEASE_TIMEOUT_US,
-		.assignment_window_us = CONFIG_RADIO_BRIDGE_ASSIGNMENT_WINDOW_US,
-		.response_slot_count = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_COUNT,
-		.response_slot_us = CONFIG_RADIO_BRIDGE_RESPONSE_SLOT_US,
 	};
 
 	LOG_INF("Bridge runtime: role=%u (%s), device_id=%016llx, group_id=%u",
@@ -869,6 +794,7 @@ int bridge_runtime_init(void)
 	uart_bridge_set_wake_callback(bridge_thread_wake);
 	radio_config = (struct rb_radio_transport_config){
 		.master = config.master,
+		.node_id = (uint8_t)role_id,
 		.group_id = group_id,
 		.addresses = radio_addresses,
 	};
@@ -889,8 +815,6 @@ int bridge_runtime_init(void)
 		}
 	}
 
-	current_profile = config.master ? RB_RADIO_MASTER_PTX :
-		RB_RADIO_SLAVE_GROUP_PRX;
 	initialized = true;
 	return 0;
 }
@@ -906,7 +830,8 @@ int bridge_runtime_start(void)
 	k_thread_create(&bridge_thread, bridge_thread_stack,
 				K_THREAD_STACK_SIZEOF(bridge_thread_stack),
 				bridge_thread_fn, NULL, NULL, NULL,
-				K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
+				K_PRIO_PREEMPT(CONFIG_NUM_PREEMPT_PRIORITIES - 2),
+				0, K_NO_WAIT);
 	started = true;
 	return 0;
 }
@@ -925,6 +850,38 @@ int bridge_runtime_validation_inject(size_t len, uint8_t seed)
 	return ret;
 }
 
+int bridge_runtime_validation_inject_uart(size_t len, uint8_t seed)
+{
+	size_t offset = 0u;
+	uint32_t baudrate = runtime_uart_baudrate;
+
+	if (baudrate == 0u) {
+		baudrate = CONFIG_RADIO_BRIDGE_UART_BAUDRATE;
+	}
+	while (offset < len) {
+		size_t chunk_len = len - offset;
+		int ret;
+
+		if (chunk_len > 64u) {
+			chunk_len = 64u;
+		}
+		ret = bridge_runtime_validation_inject(
+			chunk_len, (uint8_t)(seed + offset));
+		if (ret != 0) {
+			return ret;
+		}
+		offset += chunk_len;
+		if (offset < len) {
+			uint64_t delay_us =
+				((uint64_t)chunk_len * 10u * 1000000u + baudrate - 1u) /
+				baudrate;
+
+			k_sleep(K_USEC(delay_us));
+		}
+	}
+	return 0;
+}
+
 int bridge_runtime_validation_verify(size_t len, uint8_t seed,
 				     size_t *mismatch_offset)
 {
@@ -933,6 +890,19 @@ int bridge_runtime_validation_verify(size_t len, uint8_t seed,
 
 	ret = rb_validation_verify_output(&validation_pipe, len, seed,
 						 mismatch_offset);
+	k_spin_unlock(&validation_lock, key);
+	return ret;
+}
+
+int bridge_runtime_validation_verify_pair(size_t first_len, uint8_t first_seed,
+					  size_t second_len,
+					  uint8_t second_seed)
+{
+	int ret;
+	k_spinlock_key_t key = k_spin_lock(&validation_lock);
+
+	ret = rb_validation_verify_pair(&validation_pipe, first_len, first_seed,
+					 second_len, second_seed);
 	k_spin_unlock(&validation_lock, key);
 	return ret;
 }
@@ -1006,13 +976,29 @@ int bridge_runtime_validation_time_source_lost(void)
 
 void bridge_runtime_stats_get(struct rb_bridge_stats *stats)
 {
+	uint64_t now_us;
+
 	if (stats == NULL) {
 		return;
 	}
+	now_us = timebase_now_us();
 	*stats = bridge_stats;
 	stats->active_count = rb_scheduler_active_count(&scheduler);
-	stats->suspect_count = rb_membership_suspect_count(&scheduler.membership);
+	stats->active_mask = rb_scheduler_active_mask(&scheduler);
+	stats->node1_ack_age_us = rb_scheduler_peer_ack_age_us(&scheduler, 1u,
+							 now_us);
+	stats->node2_ack_age_us = rb_scheduler_peer_ack_age_us(&scheduler, 2u,
+							 now_us);
+	stats->node3_ack_age_us = rb_scheduler_peer_ack_age_us(&scheduler, 3u,
+							 now_us);
+	stats->node1_poll_failures =
+		rb_scheduler_peer_poll_failure_count(&scheduler, 1u);
+	stats->node2_poll_failures =
+		rb_scheduler_peer_poll_failure_count(&scheduler, 2u);
+	stats->node3_poll_failures =
+		rb_scheduler_peer_poll_failure_count(&scheduler, 3u);
 	stats->queue_drop_bytes = rb_scheduler_queue_drop_bytes(&scheduler);
+	stats->radio_event_drop_count = radio_transport_event_drop_count();
 	for (uint8_t node_id = 1u; node_id <= RB_MAX_SOURCE_NODE; node_id++) {
 		stats->node_record_drop[node_id - 1u] =
 			rb_scheduler_master_record_drop_count(&scheduler, node_id);
@@ -1023,10 +1009,12 @@ void bridge_runtime_stats_get(struct rb_bridge_stats *stats)
 	stats->downlink_duplicate_packets =
 		rb_scheduler_downlink_duplicate_count(&scheduler);
 	stats->invalid_session_packets = rb_scheduler_invalid_session_count(&scheduler);
+	stats->invalid_node_packets = rb_scheduler_invalid_node_count(&scheduler);
 	stats->sync_state = (uint8_t)sync_filter_state(&sync_filter_runtime);
 	stats->sync_age_us = sync_filter_runtime.age_us;
 	stats->slave_active = scheduler.slave_active ? 1u : 0u;
 	stats->slave_node_id = scheduler.slave_node_id;
+	stats->slave_session = scheduler.config.slave_session;
 }
 
 enum sync_filter_state bridge_runtime_sync_state(void)
